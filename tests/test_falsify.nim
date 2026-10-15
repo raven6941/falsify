@@ -298,6 +298,67 @@ for _ in 0 ..< 50:
                       proc(x: int): bool = x mod 2 == 0): suchDet = false
 check("genSuchThat deterministic per seed", suchDet)
 
+# --- Sized and recursive generation ---
+
+type Tree = ref object
+  kids: seq[Tree]  # empty = leaf
+
+proc genTree(r: var Rng): Tree =
+  r.genRecursive(
+    proc(r: var Rng): Tree = Tree(kids: @[]),
+    proc(r: var Rng, sub: proc(r: var Rng): Tree): Tree =
+      Tree(kids: @[sub(r), sub(r)]))
+
+proc treeDepth(t: Tree): int =
+  if t.kids.len == 0: 0
+  else:
+    var m = 0
+    for k in t.kids: m = max(m, treeDepth(k))
+    1 + m
+
+# genRecursive terminates and stays bounded: 500 trees at size 100.
+var rbig = initRng(424242)
+rbig.size = 100
+var maxDepth = 0
+for _ in 0 ..< 500:
+  maxDepth = max(maxDepth, treeDepth(genTree(rbig)))
+check("genRecursive terminates with bounded depth", maxDepth > 0 and maxDepth < 40)
+
+# Depth distribution shifts with size: size 0 is all leaves...
+var rzero = initRng(7)
+rzero.size = 0
+var allLeaves = true
+for _ in 0 ..< 200:
+  if treeDepth(genTree(rzero)) != 0: allLeaves = false
+check("genRecursive at size 0 generates only leaves", allLeaves)
+
+# ...while larger sizes grow deeper trees.
+var rmid = initRng(7)
+rmid.size = 50
+var deepSeen = false
+for _ in 0 ..< 200:
+  if treeDepth(genTree(rmid)) >= 2: deepSeen = true
+check("genRecursive grows deeper trees at larger size", deepSeen)
+
+# genSized passes the ambient size through.
+var rsz = initRng(1)
+rsz.size = 42
+check("genSized exposes the ambient size",
+  rsz.genSized(proc(r: var Rng, s: int): int = s) == 42)
+
+# forAll grows the ambient size across cases: 0 first, ~100 last, monotone.
+var rfa = initRng(1)
+var seenSizes: seq[int] = @[]
+discard forAll("size-growth", rfa, 50,
+  proc(r: var Rng): int =
+    seenSizes.add(r.size)
+    r.size,
+  proc(x: int): bool = true)
+var mono = seenSizes.len == 50 and seenSizes[0] == 0 and seenSizes[^1] >= 90
+for i in 1 ..< seenSizes.len:
+  if seenSizes[i] < seenSizes[i-1]: mono = false
+check("forAll grows ambient size 0..~100 across cases", mono)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

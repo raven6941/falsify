@@ -92,6 +92,39 @@ constraint into generation (e.g. `2 * r.genInt(0, 49)` for evens) — over
 heavy filtering. Filtering a wide generator is the retry-hunt equivalent of
 an unseeded stream: it works until it silently doesn't.
 
+## Sized and recursive generation
+
+Recursive data (trees, ASTs, terms) needs a generator that terminates and
+grows across a run. Two pieces:
+
+- `genSized(r, f)` runs `f` with the ambient size (`r.size`). `forAll`
+  grows the ambient size linearly from 0 to ~100 across its cases
+  (QuickCheck semantics: early cases are small, late cases explore deep
+  structures). Outside `forAll` the size is 0 unless you set `r.size`
+  yourself.
+- `genRecursive(r, leaf, branch)` builds a recursive generator from a leaf
+  generator and a branch generator. With probability `size/(size+1)` the
+  branch is taken, else the leaf — small sizes stay shallow, large sizes
+  grow. Each recursion halves the size and size 0 always takes the leaf,
+  so generation provably terminates; `branch` receives `sub`, a generator
+  for one child subtree at the halved size (call it once per child).
+
+```nim
+type Tree = ref object
+  kids: seq[Tree]  # empty = leaf
+
+proc genTree(r: var Rng): Tree =
+  r.genRecursive(
+    proc(r: var Rng): Tree = Tree(kids: @[]),
+    proc(r: var Rng, sub: proc(r: var Rng): Tree): Tree =
+      Tree(kids: @[sub(r), sub(r)]))
+```
+
+One typing note: `sub` is a closure (it captures the recursion context),
+so its parameter type carries `{.closure.}` — your `branch` lambda still
+declares it as a plain `proc` and everything typechecks, since Nim converts
+non-capturing procs to closure type implicitly.
+
 ## The seed discipline
 
 - Check in a **fixed seed** so CI is reproducible.
@@ -117,7 +150,8 @@ matters more than exhaustiveness.
 - **Generators**: `genBool`, `genInt(lo, hi)`, `genFloat(lo, hi)`,
   `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
   `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`,
-  `genSuchThat[T](gen, pred, maxRetries = 100)`
+  `genSuchThat[T](gen, pred, maxRetries = 100)`,
+  `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
 - **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil)`
 

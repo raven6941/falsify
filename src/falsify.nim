@@ -29,12 +29,16 @@ import std/macros
 type
   Rng* = object
     s: uint64
+    size*: int
+      ## Ambient generation size (see `genSized`). `forAll` grows this
+      ## linearly from 0 to ~100 across the run; outside `forAll` it stays
+      ## whatever you set it to (0 after `initRng`).
 
 proc initRng*(seed: uint64): Rng =
   ## Seed the generator. Seed 0 maps to a fixed nonzero default.
   var s = seed
   if s == 0: s = 0x9E3779B97F4A7C15'u64
-  Rng(s: s)
+  Rng(s: s, size: 0)
 
 proc next*(r: var Rng): uint64 =
   ## Next uint64. xorshift64*: deterministic across platforms.
@@ -220,6 +224,55 @@ proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
     " draws; narrow the generator (build the constraint into generation)" &
     " rather than filtering a wide one")
 
+proc genSized*[T](r: var Rng, f: proc(r: var Rng, size: int): T): T =
+  ## Run `f` with the ambient size (`r.size`).
+  ##
+  ## The ambient size is the one knob recursive generators read: `forAll`
+  ## grows it linearly from 0 to ~100 across the run (QuickCheck semantics —
+  ## early cases are small, late cases explore deeper structures). Outside
+  ## `forAll` it is 0 unless you set `r.size` yourself.
+  f(r, r.size)
+
+proc genRecursive*[T](r: var Rng,
+    leaf: proc(r: var Rng): T,
+    branch: proc(r: var Rng, sub: proc(r: var Rng): T {.closure.}): T): T =
+  ## Generate a recursive structure (tree, AST, term) from a leaf generator
+  ## and a branch generator.
+  ##
+  ## With probability `size/(size+1)` the branch is taken and with
+  ## probability `1/(size+1)` the leaf is — so small sizes stay shallow and
+  ## large sizes grow. Each recursion halves the ambient size, and size 0
+  ## always takes the leaf, so generation terminates (no fuel parameter to
+  ## thread, no runaway recursion).
+  ##
+  ## `branch` receives `sub`, a generator for one child subtree at the
+  ## halved size; call it once per child. The branch runs at the parent
+  ## size, the children at half — `genSized` inside `branch` sees the
+  ## parent's size.
+  ##
+  ## `sub` is a closure (it captures the recursion context), which is why
+  ## its parameter type carries `{.closure.}` — your `branch` lambda still
+  ## declares it as a plain `proc` and everything typechecks (Nim converts
+  ## implicitly).
+  ##
+  ##   type Tree = ref object
+  ##     kids: seq[Tree]  # empty = leaf
+  ##   proc genTree(r: var Rng): Tree =
+  ##     r.genRecursive(
+  ##       proc(r: var Rng): Tree = Tree(kids: @[]),
+  ##       proc(r: var Rng, sub: proc(r: var Rng): Tree): Tree =
+  ##         Tree(kids: @[sub(r), sub(r)]))
+  if r.size <= 0 or r.below(r.size + 1) == 0:
+    return leaf(r)
+  let childSize = r.size div 2
+  result = branch(r, proc(rr: var Rng): T {.closure.} =
+    let outer = rr.size
+    rr.size = childSize
+    try:
+      genRecursive(rr, leaf, branch)
+    finally:
+      rr.size = outer)
+
 proc shrinkInt*(x: int): seq[int] =
   ## Shrink candidates for an int, most-aggressive first: 0, then the
   ## immediate neighbor toward 0, then halving toward 0. The neighbor
@@ -266,8 +319,13 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## ordered most-aggressive first; see `shrinkInt` for the pattern.
   ## For seqs, `shrinkSeq[T]` needs an element shrinker:
   ##   `proc(s: seq[int]): seq[seq[int]] = s.shrinkSeq(shrinkInt)`.
+  ##
+  ## The ambient generation size (`r.size`, see `genSized`) grows linearly
+  ## from 0 to ~100 across the run, so recursive generators (`genRecursive`)
+  ## start shallow and explore deeper structures in later cases.
   result = true
   for i in 0 ..< n:
+    r.size = min(100, i * 100 div max(n, 1))
     let x = gen(r)
     var failed = false
     try:
