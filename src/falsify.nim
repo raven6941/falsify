@@ -53,28 +53,64 @@ proc genBool*(r: var Rng): bool =
 
 proc genInt*(r: var Rng, lo, hi: int): int =
   ## Int in [lo, hi] inclusive.
+  ##
+  ## Bug-finding bias: with probability 1/4, the result is drawn uniformly
+  ## from the "interesting" values in range — the boundaries `lo` and `hi`,
+  ## plus 0, -1, 1 when they lie in range. Otherwise uniform over [lo, hi].
+  ## Uniform generation almost never hits edges, and edges are where bugs
+  ## live (Hypothesis and QuickCheck bias the same way).
   doAssert lo <= hi, "genInt: lo > hi"
+  if r.below(4) == 0:
+    var cands: array[5, int]
+    var m = 0
+    for v in [lo, hi, 0, -1, 1]:
+      if v >= lo and v <= hi:
+        var seen = false
+        for j in 0 ..< m:
+          if cands[j] == v: seen = true; break
+        if not seen:
+          cands[m] = v
+          inc m
+    return cands[r.below(m)]
   lo + r.below(hi - lo + 1)
 
 proc genFloat*(r: var Rng, lo, hi: float): float =
   ## Float in [lo, hi).
+  ##
+  ## Bug-finding bias: with probability 1/4, returns `lo`, or 0.0 when it
+  ## lies in [lo, hi); otherwise uniform over [lo, hi).
   doAssert lo <= hi, "genFloat: lo > hi"
+  if r.below(4) == 0:
+    if lo <= 0.0 and 0.0 < hi and r.below(2) == 0:
+      return 0.0
+    return lo
   lo + (hi - lo) * (r.next().float / high(uint64).float)
 
 proc genChar*(r: var Rng): char =
   ## Printable ASCII char.
   chr(r.genInt(32, 126))
 
+proc biasedLen(r: var Rng, maxLen: int): int =
+  ## Length in [0, maxLen]. Empty and single-element lengths get elevated
+  ## probability: with probability 1/4 the length is 0 or 1 (uniformly,
+  ## clamped by maxLen); otherwise uniform over [0, maxLen].
+  doAssert maxLen >= 0, "biasedLen: negative maxLen"
+  if r.below(4) == 0:
+    return r.below(min(maxLen, 1) + 1)
+  r.below(maxLen + 1)
+
 proc genString*(r: var Rng, maxLen: int): string =
-  ## String of printable ASCII, length in [0, maxLen].
-  let n = r.below(maxLen + 1)
+  ## String of printable ASCII, length in [0, maxLen], with elevated
+  ## probability of empty and single-char strings (see `biasedLen`).
+  let n = r.biasedLen(maxLen)
   result = newString(n)
   for i in 0 ..< n:
     result[i] = r.genChar()
 
 proc genSeq*[T](r: var Rng, maxLen: int, gen: proc(r: var Rng): T): seq[T] =
-  ## Seq of length in [0, maxLen], elements from `gen`.
-  let n = r.below(maxLen + 1)
+  ## Seq of length in [0, maxLen] with elevated probability of empty and
+  ## single-element seqs (see `biasedLen`); elements from `gen`.
+  let n = r.biasedLen(maxLen)
   result = newSeq[T](n)
   for i in 0 ..< n:
     result[i] = gen(r)
