@@ -359,6 +359,41 @@ for i in 1 ..< seenSizes.len:
   if seenSizes[i] < seenSizes[i-1]: mono = false
 check("forAll grows ambient size 0..~100 across cases", mono)
 
+# --- Seed reporting (issue #9) ---
+
+import std/os
+import std/strutils
+
+# initRng records the effective seed (after the 0 -> default mapping).
+check("initRng records the seed",
+  initRng(424242).seed == 424242'u64 and initRng(0).seed != 0)
+
+# Capture stdout while running body (for asserting on forAll's report).
+template captureOutput(body: untyped): string =
+  let capPath = getTempDir() / "falsify_capture.txt"
+  let savedOut = stdout
+  stdout = open(capPath, fmWrite)
+  try:
+    body
+  finally:
+    close(stdout)
+    stdout = savedOut
+  readFile(capPath)
+
+proc failingPropRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("replay-me", r, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = x <= 7,
+    shrinkInt)
+
+let outA = captureOutput(failingPropRun(424242))
+let outB = captureOutput(failingPropRun(424242))
+check("same seed replays identical forAll failure output", outA == outB)
+check("FAIL line prints the seed", "seed: 424242" in outA)
+let outC = captureOutput(failingPropRun(99))
+check("FAIL line prints the actual seed used", "seed: 99" in outC)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

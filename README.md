@@ -21,8 +21,12 @@ if not ok: quit(1)
 On failure you get the case index and the shrunk minimal input:
 
 ```
-FAIL [reverse-twice]: case 37, minimal input: @[3, -1]
+FAIL [reverse-twice]: seed: 424242, case 37, minimal input: @[3, -1]
 ```
+
+The printed seed is the replay recipe: re-run the property with
+`initRng(424242)` (same case count, generator, property, shrinker) and you
+get the identical stream and the identical minimal counterexample.
 
 ## Edge-biased generation
 
@@ -130,7 +134,10 @@ non-capturing procs to closure type implicitly.
 - Check in a **fixed seed** so CI is reproducible.
 - When hunting a flaky property locally, loop seeds until one fails, then
   hard-code that seed as a regression case.
-- `initRng(0)` maps to a fixed nonzero default (never accidentally unseeded).
+- A failing `forAll` prints its seed (also available as `r.seed` after
+  `initRng`); copy it into a regression case to replay the exact failure.
+- `initRng(0)` maps to a fixed nonzero default (never accidentally unseeded);
+  `r.seed` records the effective seed after that mapping.
 
 ## Writing a shrinker
 

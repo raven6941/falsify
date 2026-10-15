@@ -33,12 +33,19 @@ type
       ## Ambient generation size (see `genSized`). `forAll` grows this
       ## linearly from 0 to ~100 across the run; outside `forAll` it stays
       ## whatever you set it to (0 after `initRng`).
+    seed*: uint64
+      ## The effective seed this RNG was initialized with (after the
+      ## 0 -> default mapping in `initRng`). `forAll` prints it on failure
+      ## so the failing run is replayable: re-running `initRng(seed)` with
+      ## the same `n`/gen/prop/shrink reproduces the identical stream and
+      ## the identical minimal counterexample.
 
 proc initRng*(seed: uint64): Rng =
   ## Seed the generator. Seed 0 maps to a fixed nonzero default.
+  ## The effective seed is recorded on the returned `Rng` (see `Rng.seed`).
   var s = seed
   if s == 0: s = 0x9E3779B97F4A7C15'u64
-  Rng(s: s, size: 0)
+  Rng(s: s, size: 0, seed: s)
 
 proc next*(r: var Rng): uint64 =
   ## Next uint64. xorshift64*: deterministic across platforms.
@@ -312,8 +319,12 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 prop: proc(x: T): bool,
                 shrink: proc(x: T): seq[T] = nil): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
-  ## (if a shrinker is given) and print the seed + minimal case, then
-  ## return false. Returns true iff all cases pass.
+  ## (if a shrinker is given) and print the seed + case index + minimal
+  ## case, then return false. Returns true iff all cases pass.
+  ##
+  ## The failure line is the replay recipe: it prints `r.seed` (see
+  ## `Rng.seed`), so re-running with `initRng(seed)` and the same
+  ## arguments reproduces the identical minimal counterexample.
   ##
   ## A custom shrinker has type `proc(x: T): seq[T]` returning candidates
   ## ordered most-aggressive first; see `shrinkInt` for the pattern.
@@ -350,6 +361,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
               progressed = true
               break
           if not progressed: break
-      echo "FAIL [", name, "]: case ", i, ", minimal input: ", $minimal
+      echo "FAIL [", name, "]: seed: ", r.seed, ", case ", i,
+        ", minimal input: ", $minimal
       return false
   echo "ok [", name, "]: ", n, " cases"
