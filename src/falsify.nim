@@ -197,6 +197,29 @@ proc genElements*[T](r: var Rng, xs: openArray[T]): T =
   doAssert xs.len > 0, "genElements: empty xs"
   xs[r.below(xs.len)]
 
+proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
+                     pred: proc(x: T): bool, maxRetries = 100): T =
+  ## Draw from `gen` until `pred` holds; raise `ValueError` after
+  ## `maxRetries` draws without success.
+  ##
+  ## Filtering is a blunt instrument: each retry advances the RNG stream
+  ## and a too-strict predicate silently turns generation into a hunt.
+  ## Prefer narrowing the generator — building the constraint into
+  ## generation — over heavy filtering (Hypothesis's guidance: narrow the
+  ## generator, don't just filter). A predicate that exhausts the cap is
+  ## therefore a usage error, not a wider retry loop: the `ValueError`
+  ## tells you the generator is too narrow for the predicate (or the
+  ## predicate too strict for the generator), and the fix is on one of
+  ## those two, not on the cap.
+  doAssert maxRetries > 0, "genSuchThat: maxRetries must be positive"
+  for _ in 0 ..< maxRetries:
+    let x = gen(r)
+    if pred(x): return x
+  raise newException(ValueError,
+    "genSuchThat: predicate not satisfied after " & $maxRetries &
+    " draws; narrow the generator (build the constraint into generation)" &
+    " rather than filtering a wide one")
+
 proc shrinkInt*(x: int): seq[int] =
   ## Shrink candidates for an int, most-aggressive first: 0, then the
   ## immediate neighbor toward 0, then halving toward 0. The neighbor
