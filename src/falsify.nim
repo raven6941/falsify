@@ -231,8 +231,34 @@ proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
     " draws; narrow the generator (build the constraint into generation)" &
     " rather than filtering a wide one")
 
-proc genSized*[T](r: var Rng, f: proc(r: var Rng, size: int): T): T =
-  ## Run `f` with the ambient size (`r.size`).
+proc genPair*[T, U](r: var Rng, genT: proc(r: var Rng): T,
+                    genU: proc(r: var Rng): U): (T, U) =
+  ## Pair from two element generators — the multi-input building block.
+  ##
+  ## `forAll` takes a single generator of a single value; a pair (or
+  ## triple) *is* that value for multi-input properties — algebraic laws,
+  ## relations between generated values, sorted-pair checks. Shrinking is
+  ## elementwise (see `shrinkPair`), so a failing pair shrinks to a minimal
+  ## failing pair just as an int shrinks to the minimal failing int.
+  ##
+  ##   forAll("add-commutes", r, 200,
+  ##     proc(r: var Rng): (int, int) =
+  ##       r.genPair(proc(r: var Rng): int = r.genInt(-100, 100),
+  ##                 proc(r: var Rng): int = r.genInt(-100, 100)),
+  ##     proc(p: (int, int)): bool = p[0] + p[1] == p[1] + p[0],
+  ##     proc(p: (int, int)): seq[(int, int)] =
+  ##       p.shrinkPair(shrinkInt, shrinkInt))
+  (genT(r), genU(r))
+
+proc genTriple*[T, U, V](r: var Rng, genT: proc(r: var Rng): T,
+                         genU: proc(r: var Rng): U,
+                         genV: proc(r: var Rng): V): (T, U, V) =
+  ## Triple from three element generators; the three-input version of
+  ## `genPair` (e.g. associativity `(a+b)+c == a+(b+c)`). Shrink with
+  ## `shrinkTriple`.
+  (genT(r), genU(r), genV(r))
+
+proc genSized*[T](r: var Rng, f: proc(r: var Rng, size: int): T): T =  ## Run `f` with the ambient size (`r.size`).
   ##
   ## The ambient size is the one knob recursive generators read: `forAll`
   ## grows it linearly from 0 to ~100 across the run (QuickCheck semantics —
@@ -313,6 +339,31 @@ proc shrinkSeq*[T](s: seq[T], shrinkElem: proc(x: T): seq[T]): seq[seq[T]] =
       var t = s
       t[i] = c
       if t notin result: result.add(t)
+
+proc shrinkPair*[T, U](p: (T, U), shrinkT: proc(x: T): seq[T],
+                       shrinkU: proc(x: U): seq[U]): seq[(T, U)] =
+  ## Shrink candidates for a pair, QuickCheck-tuple semantics: shrink each
+  ## component while holding the other fixed — the left component's full
+  ## candidate list first (most-aggressive first), then the right's.
+  ## Greedy `forAll` shrinking follows the first still-failing candidate
+  ## and re-shrinks the new minimal pair, so a failing pair converges to a
+  ## minimal failing pair elementwise: a threshold on either component
+  ## shrinks exactly, like `shrinkInt` does. Usage:
+  ##   `proc(p: (int, int)): seq[(int, int)] = p.shrinkPair(shrinkInt, shrinkInt)`
+  result = @[]
+  for c in shrinkT(p[0]): result.add((c, p[1]))
+  for c in shrinkU(p[1]): result.add((p[0], c))
+
+proc shrinkTriple*[T, U, V](t: (T, U, V), shrinkT: proc(x: T): seq[T],
+                            shrinkU: proc(x: U): seq[U],
+                            shrinkV: proc(x: V): seq[V]): seq[(T, U, V)] =
+  ## Shrink candidates for a triple; the three-component version of
+  ## `shrinkPair`: left, then middle, then right, each holding the others
+  ## fixed.
+  result = @[]
+  for c in shrinkT(t[0]): result.add((c, t[1], t[2]))
+  for c in shrinkU(t[1]): result.add((t[0], c, t[2]))
+  for c in shrinkV(t[2]): result.add((t[0], t[1], c))
 
 proc forAll*[T](name: string, r: var Rng, n: int,
                 gen: proc(r: var Rng): T,

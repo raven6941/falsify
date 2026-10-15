@@ -421,6 +421,99 @@ check("AssertionDefect failure prints seed and minimal input",
   "defect on input" in outD and "seed: 424242" in outD and
   "minimal input: 8" in outD)
 
+# --- Multi-input properties (issue #13) ---
+
+# genPair: components come from the element generators, and the stream
+# is deterministic per seed (bias included).
+var rp1 = initRng(424242)
+var rp2 = initRng(424242)
+var pairOk = true
+var pairDet = true
+for _ in 0 ..< 200:
+  let p1 = rp1.genPair(proc(r: var Rng): int = r.genInt(0, 9),
+                       proc(r: var Rng): char = r.genChar())
+  let p2 = rp2.genPair(proc(r: var Rng): int = r.genInt(0, 9),
+                       proc(r: var Rng): char = r.genChar())
+  if p1[0] notin 0 .. 9 or p1[1] < ' ' or p1[1] > '~': pairOk = false
+  if p1 != p2: pairDet = false
+check("genPair components respect bounds", pairOk)
+check("genPair deterministic per seed", pairDet)
+
+# genTriple: same smoke test.
+var rt = initRng(3)
+let tp = rt.genTriple(proc(r: var Rng): int = r.genInt(-5, 5),
+                      proc(r: var Rng): bool = r.genBool(),
+                      proc(r: var Rng): int = r.genInt(10, 20))
+check("genTriple components respect bounds",
+  tp[0] in -5 .. 5 and tp[2] in 10 .. 20)
+
+# shrinkPair: left component's candidates first (most-aggressive first),
+# each holding the other component fixed.
+let psc = shrinkPair((4, 5), shrinkInt, shrinkInt)
+check("shrinkPair shrinks left first, most-aggressive",
+  psc.len > 0 and psc[0] == (0, 5))
+check("shrinkPair then shrinks right holding left fixed",
+  (4, 0) in psc)
+var pairShared = true
+for c in psc:
+  if c[0] != 4 and c[1] != 5: pairShared = false
+check("shrinkPair holds one component fixed", pairShared)
+
+# shrinkTriple: all three components shrink, each holding the others.
+let tsc = shrinkTriple((4, 5, 6), shrinkInt, shrinkInt, shrinkInt)
+check("shrinkTriple shrinks each component holding the others",
+  (0, 5, 6) in tsc and (4, 0, 6) in tsc and (4, 5, 0) in tsc)
+
+# Minimality: greedy elementwise shrinking reaches the true boundary on
+# whichever component the property constrains.
+proc shrinkLoopPair(p: (int, int), fails: proc(c: (int, int)): bool): (int, int) =
+  var m = p
+  var cands = m.shrinkPair(shrinkInt, shrinkInt)
+  while cands.len > 0:
+    var progressed = false
+    for c in cands:
+      if fails(c):
+        m = c
+        cands = m.shrinkPair(shrinkInt, shrinkInt)
+        progressed = true
+        break
+    if not progressed: break
+  m
+# Minimality: greedy elementwise shrinking minimizes *every* component it
+# can while the property still fails — a pair whose first component alone
+# is constrained still shrinks the second down to 0 if that stays failing
+# (smaller still-failing pair = better minimal counterexample).
+# QuickCheck-tuple semantics: one component at a time, left first, greedy.
+check("shrinkPair reaches minimal (8, 0) for a <= 7",
+  shrinkLoopPair((42, 50), proc(c: (int, int)): bool = not (c[0] <= 7)) == (8, 0))
+check("shrinkPair reaches minimal (0, -8) for b >= -7",
+  shrinkLoopPair((42, -50), proc(c: (int, int)): bool = not (c[1] >= -7)) == (0, -8))
+
+# End to end: a broken two-input property (a + b <= 7) falsifies and
+# shrinks to the minimal failing pair. Seed is fixed, so pin it exactly.
+proc failingPairRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("pair-sum", r, 200,
+    proc(r: var Rng): (int, int) =
+      r.genPair(proc(r: var Rng): int = r.genInt(0, 100),
+                proc(r: var Rng): int = r.genInt(0, 100)),
+    proc(p: (int, int)): bool = p[0] + p[1] <= 7,
+    proc(p: (int, int)): seq[(int, int)] =
+      p.shrinkPair(shrinkInt, shrinkInt))
+
+var rmp = initRng(424242)
+check("forAll falsifies broken two-input property",
+  not forAll("pair-sum", rmp, 200,
+    proc(r: var Rng): (int, int) =
+      r.genPair(proc(r: var Rng): int = r.genInt(0, 100),
+                proc(r: var Rng): int = r.genInt(0, 100)),
+    proc(p: (int, int)): bool = p[0] + p[1] <= 7,
+    proc(p: (int, int)): seq[(int, int)] =
+      p.shrinkPair(shrinkInt, shrinkInt)))
+let outP = captureOutput(failingPairRun(424242))
+check("two-input property shrinks to minimal failing pair",
+  "minimal input: (8, 0)" in outP)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

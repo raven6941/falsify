@@ -133,6 +133,29 @@ so its parameter type carries `{.closure.}` — your `branch` lambda still
 declares it as a plain `proc` and everything typechecks, since Nim converts
 non-capturing procs to closure type implicitly.
 
+## Multi-input properties
+
+`forAll` takes a single generator of a single value — but a pair (or
+triple) *is* that value for multi-input properties: algebraic laws,
+relations between generated values, sorted-pair checks.
+
+```nim
+let ok = forAll("add-commutes", r, 200,
+  proc(r: var Rng): (int, int) =
+    r.genPair(proc(r: var Rng): int = r.genInt(-100, 100),
+              proc(r: var Rng): int = r.genInt(-100, 100)),
+  proc(p: (int, int)): bool = p[0] + p[1] == p[1] + p[0],
+  proc(p: (int, int)): seq[(int, int)] =
+    p.shrinkPair(shrinkInt, shrinkInt))
+```
+
+`genPair` / `genTriple` build the tuples; `shrinkPair` / `shrinkTriple`
+shrink them elementwise (QuickCheck-tuple semantics: one component at a
+time, left first, each holding the others fixed, most-aggressive first),
+so a failing pair shrinks to a minimal failing pair. Greedy shrinking
+minimizes every component it can while the property still fails — e.g.
+the broken property `p[0] + p[1] <= 7` shrinks to `(8, 0)`.
+
 ## The seed discipline
 
 - Check in a **fixed seed** so CI is reproducible.
@@ -162,8 +185,10 @@ matters more than exhaustiveness.
   `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
   `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`,
   `genSuchThat[T](gen, pred, maxRetries = 100)`,
+  `genPair[T, U]`, `genTriple[T, U, V]`,
   `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
-- **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`
+- **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`,
+  `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil)`
 
 Zero dependencies beyond the stdlib. Single module.
