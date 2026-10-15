@@ -181,6 +181,50 @@ let ok = forAll("reverse-twice", r, 200, gen, prop, shrink,
   regressions = @[424242'u64, 987654321'u64])
 ```
 
+## Coverage
+
+A green run says "200 cases passed" — but what *were* those cases? Pass an
+optional `classify` and `forAll` prints the observed distribution after the
+sweep, QuickCheck style. Here it checks that `genInt`'s edge bias is really
+surfacing boundary values at the advertised rate:
+
+```nim
+let ok = forAll("int-edges", r, 200,
+  proc(r: var Rng): int = r.genInt(-100, 100),
+  proc(x: int): bool = x != 424242,  # the property
+  classify = proc(x: int): seq[string] =
+    if x in [-100, 100, 0, -1, 1]: @["edge"] else: @["bulk"])
+```
+
+```
+cover [int-edges]: "bulk": 69.0% (138/200)
+cover [int-edges]: "edge": 31.0% (62/200)
+ok [int-edges]: 200 cases
+```
+
+The numbers are seed-deterministic like everything else — same seed, same
+table, bit for bit. Classification covers the random sweep only (regression
+replays are fixed cases; counting them would distort the distribution), and
+each tag counts at most once per case. Classifying never perturbs the
+stream: `classify` receives only the generated value, never the RNG, so the
+case stream is identical with or without it.
+
+For a hard guarantee instead of a printed table, add `cover`:
+
+```nim
+  cover = @[("edge", 15.0)])  # at least 15% of cases must be edges
+```
+
+A missed requirement fails the run with the evidence attached:
+
+```
+FAIL [int-edges]: coverage shortfall: "edge": 31.0% < required 50.0%
+```
+
+`cover` without `classify` is a usage error (fails loud). This is the
+analogue of QuickCheck's `cover` / Hypothesis's `target`: it turns "we
+exercised the edge cases" from a hope into a checked claim.
+
 ## Writing a shrinker
 
 A shrinker is `proc(x: T): seq[T]` returning candidates ordered
@@ -204,7 +248,9 @@ matters more than exhaustiveness.
   `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
 - **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`,
   `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
-- **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[])`
+- **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
+  classify = nil, cover = @[])`; coverage requirements are `CoverReq`
+  = `tuple[tag: string, minPct: float]`
 
 Zero dependencies beyond the stdlib. Single module.
 
