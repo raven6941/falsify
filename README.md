@@ -166,6 +166,21 @@ the broken property `p[0] + p[1] <= 7` shrinks to `(8, 0)`.
 - `initRng(0)` maps to a fixed nonzero default (never accidentally unseeded);
   `r.seed` records the effective seed after that mapping.
 
+The replay is a first-class part of the property, not a manual re-run:
+`forAll` takes an optional `regressions` list of seeds, replayed *before*
+the random sweep. Each replay runs the identical stream (same seed → same
+cases → same failure, same minimal counterexample), shrinking and
+reporting exactly like a fresh failure. A regression failure aborts the
+`forAll` and returns false, like a sweep failure; the sweep only runs
+after every replay passes. The list is explicit and checked in — no
+hidden on-disk database (Hypothesis's example database, minus the magic
+directory):
+
+```nim
+let ok = forAll("reverse-twice", r, 200, gen, prop, shrink,
+  regressions = @[424242'u64, 987654321'u64])
+```
+
 ## Writing a shrinker
 
 A shrinker is `proc(x: T): seq[T]` returning candidates ordered
@@ -189,7 +204,7 @@ matters more than exhaustiveness.
   `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
 - **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`,
   `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
-- **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil)`
+- **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[])`
 
 Zero dependencies beyond the stdlib. Single module.
 
