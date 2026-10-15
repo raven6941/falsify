@@ -28,6 +28,10 @@ The printed seed is the replay recipe: re-run the property with
 `initRng(424242)` (same case count, generator, property, shrinker) and you
 get the identical stream and the identical minimal counterexample.
 
+An `assert` (or any defect) in the property or the code under test is a
+failure, not a crash: it is reported with the seed + minimal input like
+any other failure, and `forAll` returns `false` so the suite continues.
+
 ## Edge-biased generation
 
 Uniform random generation is boring: `genInt(-1000, 1000)` almost never
