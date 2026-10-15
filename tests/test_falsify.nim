@@ -514,6 +514,69 @@ let outP = captureOutput(failingPairRun(424242))
 check("two-input property shrinks to minimal failing pair",
   "minimal input: (8, 0)" in outP)
 
+# --- Regression corpus (issue #14) ---
+
+# A regression seed replays the identical failure: copy the seed from a
+# failing run into the list and the same failure comes back, same seed,
+# same minimal input, no manual stream bookkeeping.
+proc replayFailRun() =
+  var r = initRng(999)  # sweep seed is irrelevant; the replay fails first
+  discard forAll("replay-int", r, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = x <= 7,
+    shrinkInt, @[424242'u64])
+
+let outReg = captureOutput(replayFailRun())
+check("regression replay reproduces the identical failure",
+  "seed: 424242" in outReg and "minimal input: 8" in outReg)
+
+# A regression failure aborts before the random sweep runs: exactly one
+# FAIL line (the replay's), no sweep output, returns false.
+proc countSub(s, sub: string): int =
+  var i = 0
+  while true:
+    let j = s.find(sub, i)
+    if j < 0: break
+    inc result
+    i = j + 1
+check("regression failure aborts before the sweep",
+  countSub(outReg, "FAIL [replay-int]") == 1)
+var rreg = initRng(999)
+check("regression failure returns false",
+  not forAll("replay-int", rreg, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = x <= 7,
+    shrinkInt, @[424242'u64]))
+
+# All regressions pass + sweep passes -> true; replays report their seeds.
+proc replayOkRun() =
+  var r = initRng(123)
+  discard forAll("replay-ok", r, 50,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = x >= 0,
+    shrinkInt, @[11'u64, 22'u64])
+let outOk = captureOutput(replayOkRun())
+check("passing replays report their seeds",
+  "replay seed 11" in outOk and "replay seed 22" in outOk and
+  "ok [replay-ok]: 50 cases" in outOk)
+var rrok = initRng(123)
+check("all replays pass + sweep passes -> true",
+  forAll("replay-ok", rrok, 50,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = x >= 0,
+    shrinkInt, @[11'u64, 22'u64]))
+
+# Empty list is the old behavior, bit for bit: existing calls compile
+# unchanged (exercised by every test above) and print the same lines.
+proc noRegressRun() =
+  var r = initRng(5)
+  discard forAll("replay-empty", r, 10,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = x >= 0,
+    shrinkInt)
+check("empty regression list behaves like before",
+  "replay seed" notin captureOutput(noRegressRun()))
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

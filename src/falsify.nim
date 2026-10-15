@@ -368,7 +368,8 @@ proc shrinkTriple*[T, U, V](t: (T, U, V), shrinkT: proc(x: T): seq[T],
 proc forAll*[T](name: string, r: var Rng, n: int,
                 gen: proc(r: var Rng): T,
                 prop: proc(x: T): bool,
-                shrink: proc(x: T): seq[T] = nil): bool =
+                shrink: proc(x: T): seq[T] = nil,
+                regressions: seq[uint64] = @[]): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
   ## case, then return false. Returns true iff all cases pass.
@@ -394,38 +395,58 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## The ambient generation size (`r.size`, see `genSized`) grows linearly
   ## from 0 to ~100 across the run, so recursive generators (`genRecursive`)
   ## start shallow and explore deeper structures in later cases.
+  ##
+  ## Regression corpus: `regressions` is a list of seeds replayed *before*
+  ## the random sweep. Copy the seed from a failing run's FAIL line into
+  ## the list — each replay runs the identical stream (same seed → same
+  ## cases → same failure, same minimal counterexample), shrinking and
+  ## reporting exactly like a fresh failure, with no manual stream
+  ## bookkeeping. A regression failure aborts the whole `forAll` and
+  ## returns false, just like a sweep failure; the random sweep only runs
+  ## after every replay passes. The list is explicit and checked in —
+  ## no hidden on-disk database, no state the next reader can't see
+  ## (Hypothesis's example database, minus the magic directory).
+  proc runSweep(rr: var Rng, isReplay: bool): bool =
+    result = true
+    for i in 0 ..< n:
+      rr.size = min(100, i * 100 div max(n, 1))
+      let x = gen(rr)
+      var failed = false
+      try:
+        failed = not prop(x)
+      except CatchableError as e:
+        echo "FAIL [", name, "]: exception on input: ", e.msg
+        failed = true
+      except Defect as d:
+        echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
+        failed = true
+      if failed:
+        result = false
+        var minimal = x
+        if shrink != nil:
+          var cands = shrink(minimal)
+          while cands.len > 0:
+            var progressed = false
+            for c in cands:
+              var cf = false
+              try: cf = not prop(c)
+              except CatchableError: cf = true
+              except Defect: cf = true
+              if cf:
+                minimal = c
+                cands = shrink(minimal)
+                progressed = true
+                break
+            if not progressed: break
+        echo "FAIL [", name, "]: seed: ", rr.seed, ", case ", i,
+          ", minimal input: ", $minimal
+        return false
+    if isReplay:
+      echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
+    else:
+      echo "ok [", name, "]: ", n, " cases"
   result = true
-  for i in 0 ..< n:
-    r.size = min(100, i * 100 div max(n, 1))
-    let x = gen(r)
-    var failed = false
-    try:
-      failed = not prop(x)
-    except CatchableError as e:
-      echo "FAIL [", name, "]: exception on input: ", e.msg
-      failed = true
-    except Defect as d:
-      echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
-      failed = true
-    if failed:
-      result = false
-      var minimal = x
-      if shrink != nil:
-        var cands = shrink(minimal)
-        while cands.len > 0:
-          var progressed = false
-          for c in cands:
-            var cf = false
-            try: cf = not prop(c)
-            except CatchableError: cf = true
-            except Defect: cf = true
-            if cf:
-              minimal = c
-              cands = shrink(minimal)
-              progressed = true
-              break
-          if not progressed: break
-      echo "FAIL [", name, "]: seed: ", r.seed, ", case ", i,
-        ", minimal input: ", $minimal
-      return false
-  echo "ok [", name, "]: ", n, " cases"
+  for seed in regressions:
+    var rr = initRng(seed)
+    if not runSweep(rr, isReplay = true): return false
+  if not runSweep(r, isReplay = false): return false
