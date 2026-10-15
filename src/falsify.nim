@@ -23,6 +23,8 @@
 ## hunting a flaky property locally, loop over seeds until one fails, then
 ## hard-code that seed as a regression case.
 
+import std/macros
+
 
 type
   Rng* = object
@@ -114,6 +116,86 @@ proc genSeq*[T](r: var Rng, maxLen: int, gen: proc(r: var Rng): T): seq[T] =
   result = newSeq[T](n)
   for i in 0 ..< n:
     result[i] = gen(r)
+
+macro genOneOf*(r: var Rng, gens: untyped): untyped =
+  ## Uniform choice among generator *expressions*; exactly one is evaluated.
+  ##
+  ##   r.genOneOf([r.genInt(0, 9), r.genInt(10, 99), 42])
+  ##
+  ## A macro rather than a proc, deliberately: Nim infers
+  ## `{.noSideEffect, gcsafe.}` on generator lambdas, so a `proc` parameter
+  ## nested in a collection never matches an inline lambda — and a lambda
+  ## that captures a local infers `{.closure.}`, matching nothing at all.
+  ## Taking expressions keeps the natural call syntax, full laziness (the
+  ## unchosen generators never run), and closures working.
+  ##
+  ## `gens` must be a literal `[...]`. An empty array is a compile-time error.
+  if gens.kind != nnkBracket or gens.len == 0:
+    error("genOneOf expects a non-empty literal [gen, ...] array", gens)
+  let idx = genSym(nskLet, "oneOfIdx")
+  result = newStmtList(
+    newLetStmt(idx, newCall(newDotExpr(r, ident"below"), newLit(gens.len))))
+  var ifStmt = newNimNode(nnkIfStmt)
+  for i in 0 ..< gens.len:
+    ifStmt.add(newTree(nnkElifBranch,
+      newCall(ident"==", idx, newLit(i)), gens[i]))
+  # `idx < gens.len` always holds, so else is unreachable; it keeps the
+  # if exhaustive so the macro can be used as an expression.
+  ifStmt.add(newTree(nnkElse, gens[^1]))
+  result.add(ifStmt)
+
+macro genFrequency*(r: var Rng, choices: untyped): untyped =
+  ## Weighted choice among `(weight, generator-expression)` pairs; exactly
+  ## one generator is evaluated, with probability proportional to its weight.
+  ##
+  ##   r.genFrequency([(9, r.genInt(0, 100)),   # the common case
+  ##                   (1, r.genInt(-100, 100))]) # the weird one
+  ##
+  ## A macro for the same reason as `genOneOf` (see its docstring): lambdas
+  ## in collections cannot match `proc` parameters in Nim. `choices` must be
+  ## a literal `[(weight, gen), ...]` array; an empty array is a compile-time
+  ## error, and each weight is checked positive at run time (each weight
+  ## expression is evaluated exactly once, in order).
+  if choices.kind != nnkBracket or choices.len == 0:
+    error("genFrequency expects a non-empty literal [(weight, gen), ...] array",
+      choices)
+  var wSyms: seq[NimNode] = @[]
+  var genExprs: seq[NimNode] = @[]
+  result = newNimNode(nnkBlockStmt).add(newEmptyNode(), newStmtList())
+  let body = result[1]
+  for c in choices:
+    if c.kind != nnkTupleConstr or c.len != 2:
+      error("genFrequency expects (weight, gen) pairs", c)
+    let w = genSym(nskLet, "freqW")
+    wSyms.add(w)
+    genExprs.add(c[1])
+    # Each weight expression is evaluated exactly once, in order.
+    body.add(newLetStmt(w, c[0]))
+    body.add(newCall(ident"doAssert",
+      newCall(ident">", w, newLit(0)),
+      newLit("genFrequency: weights must be positive")))
+  var sumExpr: NimNode = wSyms[0]
+  for s in wSyms[1 .. ^1]:
+    sumExpr = newCall(ident"+", sumExpr, s)
+  let pick = genSym(nskVar, "freqPick")
+  body.add(newVarStmt(pick, newCall(newDotExpr(r, ident"below"), sumExpr)))
+  var ifStmt = newNimNode(nnkIfStmt)
+  var cumul: NimNode = wSyms[0]
+  ifStmt.add(newTree(nnkElifBranch,
+    newCall(ident"<", pick, cumul), genExprs[0]))
+  for i in 1 ..< genExprs.len:
+    cumul = newCall(ident"+", cumul, wSyms[i])
+    ifStmt.add(newTree(nnkElifBranch,
+      newCall(ident"<", pick, cumul), genExprs[i]))
+  # `pick < total` always holds; else keeps the if exhaustive as an expression.
+  ifStmt.add(newTree(nnkElse, genExprs[^1]))
+  body.add(ifStmt)
+
+proc genElements*[T](r: var Rng, xs: openArray[T]): T =
+  ## Uniform pick of a value from `xs`. An empty `xs` is a usage error.
+  ## (A plain proc: values have no laziness or lambda-typing concerns.)
+  doAssert xs.len > 0, "genElements: empty xs"
+  xs[r.below(xs.len)]
 
 proc shrinkInt*(x: int): seq[int] =
   ## Shrink candidates for an int, most-aggressive first: 0, then the

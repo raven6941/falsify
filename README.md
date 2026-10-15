@@ -45,6 +45,35 @@ still means same sequence, bit for bit. But note the distributions changed
 in 0.2.0 — a seed that produced one stream under 0.1.0 produces a different
 stream now.
 
+## Weighted and categorical choice
+
+`genFrequency` picks among generator *expressions* with probability
+proportional to their weights — "mostly normal cases, sometimes the weird
+one":
+
+```nim
+let v = r.genFrequency([(9, r.genInt(0, 100)),    # the common case
+                        (1, r.genInt(-100, 100))]) # the weird one
+```
+
+`genOneOf([g0, g1, g2])` is uniform choice among generator expressions;
+`genElements(xs)` picks a value from `xs`.
+
+`genOneOf` and `genFrequency` are macros, not procs, and this is
+deliberate: a proc taking a *collection* of generator procs cannot accept
+inline lambdas in Nim. The compiler infers `{.noSideEffect, gcsafe.}` on a
+lambda (mutating a `var` parameter doesn't count as a side effect for this
+analysis), so it never matches a plain `proc` parameter — and a lambda that
+captures a local infers `{.closure.}`, matching nothing at all. Taking
+expressions keeps the natural call syntax, evaluates exactly one branch per
+draw (laziness: unchosen generators never run, never advance the RNG), and
+lets generators close over locals. `genElements` takes values, so it stays
+a plain proc.
+
+Empty inputs are usage errors: `genOneOf([])` / `genFrequency([])` fail at
+compile time; `genElements([])` and non-positive weights fail at run time
+(`doAssert`).
+
 ## The seed discipline
 
 - Check in a **fixed seed** so CI is reproducible.
@@ -68,7 +97,8 @@ matters more than exhaustiveness.
 
 - **RNG**: `Rng`, `initRng(seed)`, `next()`, `below(n)`
 - **Generators**: `genBool`, `genInt(lo, hi)`, `genFloat(lo, hi)`,
-  `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`
+  `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
+  `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`
 - **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil)`
 

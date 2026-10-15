@@ -165,6 +165,99 @@ for _ in 0 ..< 200:
      rg2.genSeq(10, proc(r: var Rng): int = r.genInt(0, 9)): biasDet = false
 check("biased generators deterministic per seed", biasDet)
 
+# Combinators (issue #2): weighted/categorical choice.
+#
+# genFrequency with weights 1:2:3 over 6000 draws: expected 1000/2000/3000,
+# sigma ~29; bands are ~+-10 sigma. The "generators" here are constant
+# expressions — the macros take expressions, not procs.
+var rw = initRng(2024)
+var wCounts = [0, 0, 0]
+for _ in 0 ..< 6000:
+  let v = rw.genFrequency([(1, 0), (2, 1), (3, 2)])
+  inc wCounts[v]
+check("genFrequency weights ~1:2:3",
+  wCounts[0] in 700 .. 1300 and wCounts[1] in 1700 .. 2300 and
+  wCounts[2] in 2700 .. 3300)
+
+# genOneOf: covers all, roughly uniform (expected 1000 each, sigma ~26).
+var ro = initRng(55)
+var oSeen = [false, false, false]
+var oCounts = [0, 0, 0]
+for _ in 0 ..< 3000:
+  let v = ro.genOneOf([0, 1, 2])
+  oSeen[v] = true
+  inc oCounts[v]
+check("genOneOf covers all", oSeen[0] and oSeen[1] and oSeen[2])
+check("genOneOf roughly uniform",
+  oCounts[0] in 850 .. 1150 and oCounts[1] in 850 .. 1150 and
+  oCounts[2] in 850 .. 1150)
+
+# Real generator expressions, including one capturing a local — the case a
+# proc-based design cannot express (capturing lambdas infer {.closure.}).
+let lo = -50
+var rcap = initRng(31)
+var capOk = true
+var capSawConst = false
+for _ in 0 ..< 300:
+  let v = rcap.genOneOf([rcap.genInt(lo, lo + 10), 999])
+  if v == 999: capSawConst = true
+  elif v notin lo .. lo + 10: capOk = false
+check("genOneOf with capturing generator", capOk and capSawConst)
+
+# Laziness: exactly one branch is evaluated per draw.
+var evalCount = 0
+var rl = initRng(7)
+for _ in 0 ..< 100:
+  discard rl.genOneOf([block: inc evalCount; 1, block: inc evalCount; 2])
+check("genOneOf evaluates exactly one branch", evalCount == 100)
+
+# genElements: only ever picks from xs, and covers all of them.
+var re = initRng(66)
+var eSeen = [false, false, false, false]
+var eOnly = true
+for _ in 0 ..< 200:
+  case re.genElements(["a", "b", "c", "d"])
+  of "a": eSeen[0] = true
+  of "b": eSeen[1] = true
+  of "c": eSeen[2] = true
+  of "d": eSeen[3] = true
+  else: eOnly = false
+check("genElements only picks from xs", eOnly)
+check("genElements covers all", eSeen[0] and eSeen[1] and eSeen[2] and eSeen[3])
+
+# Empty inputs are usage errors: compile-time for the macros (literal `[]`),
+# runtime for genElements.
+static:
+  var rsc = initRng(1)
+  assert not compiles(rsc.genOneOf([])), "genOneOf([]) must not compile"
+  assert not compiles(rsc.genFrequency([])), "genFrequency([]) must not compile"
+check("empty genOneOf/genFrequency are compile-time errors", true)
+
+var emptyErrs = 0
+try:
+  var rz = initRng(1)
+  discard rz.genElements(newSeq[int]())
+except AssertionDefect:
+  inc emptyErrs
+try:
+  var rz = initRng(1)
+  discard rz.genFrequency([(1, 10), (0, 20)])
+except AssertionDefect:
+  inc emptyErrs
+check("empty genElements / non-positive weight raise", emptyErrs == 2)
+
+# Combinators are part of the stream: same seed -> same sequence.
+var rc1 = initRng(424242)
+var rc2 = initRng(424242)
+var combDet = true
+for _ in 0 ..< 100:
+  if rc1.genElements([1, 2, 3]) != rc2.genElements([1, 2, 3]): combDet = false
+  if rc1.genOneOf([rc1.genInt(0, 9), rc1.genInt(10, 19)]) !=
+     rc2.genOneOf([rc2.genInt(0, 9), rc2.genInt(10, 19)]): combDet = false
+  if rc1.genFrequency([(3, rc1.genInt(0, 9)), (1, rc1.genInt(10, 19))]) !=
+     rc2.genFrequency([(3, rc2.genInt(0, 9)), (1, rc2.genInt(10, 19))]): combDet = false
+check("combinators deterministic per seed", combDet)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
