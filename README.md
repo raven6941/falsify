@@ -24,6 +24,27 @@ On failure you get the case index and the shrunk minimal input:
 FAIL [reverse-twice]: case 37, minimal input: @[3, -1]
 ```
 
+## Edge-biased generation
+
+Uniform random generation is boring: `genInt(-1000, 1000)` almost never
+produces 0 or the boundaries, and those are where bugs live. So the
+generators are biased toward edge cases (Hypothesis and QuickCheck do the
+same):
+
+- `genInt(lo, hi)`: with probability 1/4, drawn uniformly from the
+  interesting values in range — `lo`, `hi`, and 0, −1, 1 when in range;
+  otherwise uniform over `[lo, hi]`.
+- `genFloat(lo, hi)`: with probability 1/4, returns `lo` or 0.0 (when 0.0
+  lies in `[lo, hi)`); otherwise uniform over `[lo, hi)`.
+- `genString` / `genSeq`: with probability 1/4, the length is 0 or 1
+  (empty and single-element cases get their turn); otherwise uniform over
+  `[0, maxLen]`.
+
+The bias is part of the stream, not a coin flipped outside it: same seed
+still means same sequence, bit for bit. But note the distributions changed
+in 0.2.0 — a seed that produced one stream under 0.1.0 produces a different
+stream now.
+
 ## The seed discipline
 
 - Check in a **fixed seed** so CI is reproducible.

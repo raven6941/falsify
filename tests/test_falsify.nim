@@ -89,6 +89,82 @@ check("forAll treats exceptions as failures",
     proc(r: var Rng): int = 0,
     proc(x: int): bool = raise newException(ValueError, "boom")))
 
+# Edge bias (issue #1): interesting values appear with the designed probability.
+#
+# genInt(-100, 100): interesting set is {-100, 100, 0, -1, 1}, 5 of 201 values.
+# P(draw is interesting) = 1/4 + 3/4 * 5/201 ~ 0.269. Over 4000 draws the
+# observed fraction must sit near the design point (band is ~+-9 sigma).
+var rb = initRng(424242)
+var edgeHits = 0
+const EdgeDraws = 4000
+for _ in 0 ..< EdgeDraws:
+  if rb.genInt(-100, 100) in [-100, 100, 0, -1, 1]: inc edgeHits
+let edgeFrac = edgeHits.float / EdgeDraws.float
+check("genInt edge bias near designed 1/4+", edgeFrac > 0.20 and edgeFrac < 0.35)
+
+# The headline case from the issue: 0 must show up fast.
+# P(miss in 200 draws) ~ 1.7e-5 per seed; checked across seeds, fixed => deterministic.
+for seed in [11'u64, 424242'u64, 999999'u64]:
+  var r0 = initRng(seed)
+  var sawZero = false
+  for _ in 0 ..< 200:
+    if r0.genInt(-100, 100) == 0: sawZero = true
+  check("genInt(-100,100): 0 appears in 200 draws (seed " & $seed & ")", sawZero)
+
+# Degenerate and lopsided ranges: bias must respect bounds, never invent values.
+var rd = initRng(31337)
+var degOk = true
+for _ in 0 ..< 500:
+  if rd.genInt(5, 5) != 5: degOk = false
+  if rd.genInt(7, 9) notin 7 .. 9: degOk = false
+  if rd.genInt(-3, -1) notin -3 .. -1: degOk = false
+check("genInt bias respects degenerate/lopsided ranges", degOk)
+
+# genString / genSeq: empty and single-element with elevated probability.
+# P(len 0) = 1/4*1/2 + 3/4*1/51 ~ 0.14; missing it in 200 draws ~ 1e-13.
+var rs = initRng(777)
+var sawEmpty = false
+var sawSingle = false
+for _ in 0 ..< 200:
+  let n = rs.genString(50).len
+  if n == 0: sawEmpty = true
+  if n == 1: sawSingle = true
+check("genString: empty appears in 200 draws", sawEmpty)
+check("genString: single-char appears in 200 draws", sawSingle)
+
+var rq = initRng(778)
+var sawEmptySeq = false
+for _ in 0 ..< 200:
+  if rq.genSeq(30, proc(r: var Rng): int = r.genInt(0, 9)).len == 0:
+    sawEmptySeq = true
+check("genSeq: empty appears in 200 draws", sawEmptySeq)
+
+# genFloat: 0.0 and lo appear fast; bounds contract ([lo, hi)) still holds.
+var rf = initRng(31337)
+var sawFZero = false
+var sawFLo = false
+var fBoundsOk = true
+for _ in 0 ..< 200:
+  let f = rf.genFloat(-1.0, 1.0)
+  if f == 0.0: sawFZero = true
+  if f == -1.0: sawFLo = true
+  if f < -1.0 or f >= 1.0: fBoundsOk = false
+check("genFloat: 0.0 appears in 200 draws", sawFZero)
+check("genFloat: lo appears in 200 draws", sawFLo)
+check("genFloat bias keeps [lo, hi) contract", fBoundsOk)
+
+# The bias is part of the stream: same seed -> same biased sequence.
+var rg1 = initRng(424242)
+var rg2 = initRng(424242)
+var biasDet = true
+for _ in 0 ..< 200:
+  if rg1.genInt(-100, 100) != rg2.genInt(-100, 100): biasDet = false
+  if rg1.genString(20) != rg2.genString(20): biasDet = false
+  if rg1.genFloat(-1.0, 1.0) != rg2.genFloat(-1.0, 1.0): biasDet = false
+  if rg1.genSeq(10, proc(r: var Rng): int = r.genInt(0, 9)) !=
+     rg2.genSeq(10, proc(r: var Rng): int = r.genInt(0, 9)): biasDet = false
+check("biased generators deterministic per seed", biasDet)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
