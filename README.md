@@ -74,6 +74,24 @@ Empty inputs are usage errors: `genOneOf([])` / `genFrequency([])` fail at
 compile time; `genElements([])` and non-positive weights fail at run time
 (`doAssert`).
 
+## Constrained generation
+
+`genSuchThat(gen, pred)` draws from `gen` until `pred` holds — even numbers,
+strings matching a shape, pairs in order:
+
+```nim
+let even = r.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99),
+                         proc(x: int): bool = x mod 2 == 0)
+```
+
+After `maxRetries` draws (default 100) without success it raises `ValueError`
+— and that error is advice, not a knob: a predicate that exhausts the cap
+means the generator is too narrow for the predicate, or the predicate too
+strict for the generator. Prefer narrowing the generator — building the
+constraint into generation (e.g. `2 * r.genInt(0, 49)` for evens) — over
+heavy filtering. Filtering a wide generator is the retry-hunt equivalent of
+an unseeded stream: it works until it silently doesn't.
+
 ## The seed discipline
 
 - Check in a **fixed seed** so CI is reproducible.
@@ -98,7 +116,8 @@ matters more than exhaustiveness.
 - **RNG**: `Rng`, `initRng(seed)`, `next()`, `below(n)`
 - **Generators**: `genBool`, `genInt(lo, hi)`, `genFloat(lo, hi)`,
   `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
-  `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`
+  `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`,
+  `genSuchThat[T](gen, pred, maxRetries = 100)`
 - **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil)`
 

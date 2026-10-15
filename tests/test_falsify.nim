@@ -258,6 +258,46 @@ for _ in 0 ..< 100:
      rc2.genFrequency([(3, rc2.genInt(0, 9)), (1, rc2.genInt(10, 19))]): combDet = false
 check("combinators deterministic per seed", combDet)
 
+# genSuchThat: even numbers from a plain genInt stream.
+var rse = initRng(424242)
+var allEven = true
+for _ in 0 ..< 200:
+  let x = rse.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99),
+                          proc(x: int): bool = x mod 2 == 0)
+  if x mod 2 != 0: allEven = false
+check("genSuchThat generates even numbers", allEven)
+
+# genSuchThat: an impossible predicate raises ValueError at the cap.
+var raised = false
+try:
+  var rst = initRng(1)
+  discard rst.genSuchThat(proc(r: var Rng): int = r.genInt(0, 9),
+                          proc(x: int): bool = false)
+except ValueError:
+  raised = true
+check("genSuchThat raises ValueError on impossible predicate", raised)
+
+# genSuchThat: non-positive maxRetries is a usage error.
+var capErrs = 0
+try:
+  var rsc2 = initRng(1)
+  discard rsc2.genSuchThat(proc(r: var Rng): int = r.genInt(0, 9),
+                           proc(x: int): bool = true, maxRetries = 0)
+except AssertionDefect:
+  inc capErrs
+check("genSuchThat rejects non-positive maxRetries", capErrs == 1)
+
+# genSuchThat is part of the stream: same seed -> same result.
+var rsu1 = initRng(777)
+var rsu2 = initRng(777)
+var suchDet = true
+for _ in 0 ..< 50:
+  if rsu1.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99),
+                      proc(x: int): bool = x mod 2 == 0) !=
+     rsu2.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99),
+                      proc(x: int): bool = x mod 2 == 0): suchDet = false
+check("genSuchThat deterministic per seed", suchDet)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
