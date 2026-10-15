@@ -326,6 +326,15 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## `Rng.seed`), so re-running with `initRng(seed)` and the same
   ## arguments reproduces the identical minimal counterexample.
   ##
+  ## Defects (e.g. `AssertionDefect` from an `assert` in the property or
+  ## the code under test) are failures, not crashes: they are reported
+  ## with the seed + minimal input like any other failure, and `forAll`
+  ## returns false so the suite continues. This is catch-and-report, not
+  ## report-and-reraise — a harness that aborts mid-suite loses every
+  ## later property and, worse, the counterexample report. Defects raised
+  ## by the *generator* itself (harness misuse, e.g. empty `genElements`)
+  ## still propagate: those are programming errors, fail loud.
+  ##
   ## A custom shrinker has type `proc(x: T): seq[T]` returning candidates
   ## ordered most-aggressive first; see `shrinkInt` for the pattern.
   ## For seqs, `shrinkSeq[T]` needs an element shrinker:
@@ -344,6 +353,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     except CatchableError as e:
       echo "FAIL [", name, "]: exception on input: ", e.msg
       failed = true
+    except Defect as d:
+      echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
+      failed = true
     if failed:
       result = false
       var minimal = x
@@ -355,6 +367,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
             var cf = false
             try: cf = not prop(c)
             except CatchableError: cf = true
+            except Defect: cf = true
             if cf:
               minimal = c
               cands = shrink(minimal)

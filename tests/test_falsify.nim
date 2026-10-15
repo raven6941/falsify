@@ -394,6 +394,33 @@ check("FAIL line prints the seed", "seed: 424242" in outA)
 let outC = captureOutput(failingPropRun(99))
 check("FAIL line prints the actual seed used", "seed: 99" in outC)
 
+# --- Defects are failures, not crashes (issue #10) ---
+
+proc failingAssertRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("assert-replay", r, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool =
+      assert x <= 7
+      true,
+    shrinkInt)
+
+# An assertion failure in the property is reported and returns false;
+# the suite binary continues (this check itself runs after it).
+var rd10 = initRng(424242)
+check("forAll treats AssertionDefect as a failure",
+  not forAll("assert-fails", rd10, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool =
+      assert x <= 7
+      true,
+    shrinkInt))
+
+let outD = captureOutput(failingAssertRun(424242))
+check("AssertionDefect failure prints seed and minimal input",
+  "defect on input" in outD and "seed: 424242" in outD and
+  "minimal input: 8" in outD)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
