@@ -1177,6 +1177,53 @@ let nanOut = captureOutput(doNanRun())
 check("targeting: NaN scores are ignored, no crash",
   "best target score" notin nanOut and "ok [target-nan]: 50 cases" in nanOut)
 
+# --- Float specials (issue #33) ---
+
+# A property that fails only on NaN is found with allowNaN=true.
+# Recorded seeds (2026-10-15); P(missing NaN) per seed is (15/16)^200.
+proc doNanHunt(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("nan-hunt", r, 200,
+    proc(r: var Rng): float = r.genFloat(0.0, 100.0, allowNaN = true),
+    proc(x: float): bool = x == x,
+    shrinkFloat)
+proc nanHuntOut(seed: uint64): string = captureOutput(doNanHunt(seed))
+
+for nSeed in [1'u64, 42, 424242]:
+  let nOut = nanHuntOut(nSeed)
+  check("float specials: NaN-only failure found on seed " & $nSeed,
+    "FAIL [nan-hunt]" in nOut and "minimal input: nan" in nOut)
+check("float specials: same seed replays byte-identical output",
+  nanHuntOut(424242) == nanHuntOut(424242))
+
+# Defaults never produce NaN/Inf and stay in range; -0.0 and subnormals do
+# appear (fixed seed 7: measured 83 -0.0s and 163 subnormals in 5000 draws).
+var rDef = initRng(7)
+var defNan, defInf, defNegZero, defSub = 0
+var defInRange = true
+for _ in 0 ..< 2000:
+  let x = rDef.genFloat(-10.0, 10.0)
+  if x != x: inc defNan
+  elif x == Inf or x == -Inf: inc defInf
+  elif x == 0.0 and 1.0 / x == -Inf: inc defNegZero
+  elif x != 0.0 and abs(x) < 1e-300: inc defSub
+  if x < -10.0 or x >= 10.0: defInRange = false
+check("float specials: defaults never produce NaN/Inf",
+  defNan == 0 and defInf == 0)
+check("float specials: defaults stay in [lo, hi)", defInRange)
+check("float specials: defaults produce -0.0 and subnormals",
+  defNegZero > 0 and defSub > 0)
+
+# Opt-in produces the specials (fixed seed 7).
+var rOpt = initRng(7)
+var optNan, optInf = 0
+for _ in 0 ..< 2000:
+  let x = rOpt.genFloat(-10.0, 10.0, allowNaN = true, allowInf = true)
+  if x != x: inc optNan
+  elif x == Inf or x == -Inf: inc optInf
+check("float specials: opt-in produces NaN and ±Inf",
+  optNan > 0 and optInf > 0)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
