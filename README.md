@@ -207,6 +207,49 @@ let ok = forAll("reverse-twice", r, 200, gen, prop, shrink,
   regressions = @[424242'u64, 987654321'u64])
 ```
 
+## Preconditions
+
+Sometimes the property only makes sense on part of the input space —
+"for all *positive* x". Pass `assume` and `forAll` discards the rest,
+QuickCheck-`==>` style:
+
+```nim
+let ok = forAll("div-roundtrip", r, 200,
+  proc(r: var Rng): (int, int) =
+    r.genPair(proc(r: var Rng): int = r.genInt(-100, 100),
+              proc(r: var Rng): int = r.genInt(-100, 100)),
+  proc(p: (int, int)): bool =
+    (p[0] div p[1]) * p[1] + p[0] mod p[1] == p[0],
+  proc(p: (int, int)): seq[(int, int)] =
+    p.shrinkPair(shrinkInt, shrinkInt),
+  assume = proc(p: (int, int)): bool = p[1] != 0)
+```
+
+```
+ok [div-roundtrip]: 200 cases, 3 discarded
+```
+
+A discarded case is counted and reported, never a failure, and never
+classified. If discards exceed `maxDiscards` (default 500) the run aborts
+with a gave-up line instead of spinning on an unsatisfiable precondition:
+
+```
+FAIL [div-roundtrip]: gave up: discarded 501 > maxDiscards 500 cases
+```
+
+An exception or defect *inside* `assume` is a programming error and fails
+the run like a property failure. Discarded draws still consume RNG, so the
+case stream is identical with or without `assume` — only which cases get
+evaluated changes (the FAIL line's case number is the draw index in that
+stream). `assume` applies to regression replays too: a replayed seed whose
+case now fails `assume` is discarded, not failed — the property changed,
+not the stream.
+
+The standing advice applies: prefer narrowing the generator over heavy
+filtering. A precondition that discards most cases is usually a generator
+that should have produced satisfying cases directly (same guidance as
+`genSuchThat`).
+
 ## Coverage
 
 A green run says "200 cases passed" — but what *were* those cases? Pass an
@@ -280,7 +323,7 @@ matters more than exhaustiveness.
 - **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
   `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
-  classify = nil, cover = @[])`; coverage requirements are `CoverReq`
+  classify = nil, cover = @[], assume = nil, maxDiscards = 500)`; coverage requirements are `CoverReq`
   = `tuple[tag: string, minPct: float]`
 
 Zero dependencies beyond the stdlib. Single module.
