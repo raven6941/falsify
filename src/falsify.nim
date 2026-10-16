@@ -687,6 +687,47 @@ proc defaultHealth*(): HealthChecks =
   result = HealthChecks(maxMeanCaseMs: 50.0, maxMeanInputBytes: 1 shl 20,
                         maxDiscardRatio: 0.5, minExamples: 10, failOn: {})
 
+type FalsifySettings* = object
+  ## The tuning knobs of a `forAll` sweep, bundled so a project can name a
+  ## convention once (CI runs deep, local runs fast) instead of repeating
+  ## sixteen parameters at every call site. The case count `n` stays a
+  ## positional `forAll` parameter — it is the most-set knob and reads
+  ## naturally there. Everything per-property (`gen`, `prop`, `shrink`,
+  ## `regressions`, `examples`, `classify`, `cover`, `assume`, `target`)
+  ## stays a `forAll` parameter: settings hold only tuning.
+  maxDiscards*: int
+    ## Abort with a gave-up line once this many cases are discarded
+    ## (default 500). 0 tolerates no discards.
+  deadlineMs*: int
+    ## Per-case deadline in milliseconds, 0 = disabled (default 0).
+  maxShrinks*: int
+    ## Shrink-phase candidate budget, 0 = unbounded (default 0).
+  health*: HealthChecks
+    ## Health-check thresholds (default `defaultHealth()`).
+
+proc defaultSettings*(): FalsifySettings =
+  ## The knob values `forAll` used before settings existed: a run with
+  ## `settings = defaultSettings()` is byte-identical to the old
+  ## parameter defaults.
+  FalsifySettings(maxDiscards: 500, deadlineMs: 0, maxShrinks: 0,
+                  health: defaultHealth())
+
+var settingsProfiles = initTable[string, FalsifySettings]()
+  ## Named-settings registry backing `defineProfile` / `withProfile`.
+
+proc defineProfile*(name: string, s: FalsifySettings) =
+  ## Register `s` under `name` so every property in the suite can share
+  ## one tuning convention: `settings = withProfile("ci")`. Re-defining a
+  ## name replaces the previous profile.
+  settingsProfiles[name] = s
+
+proc withProfile*(name: string): FalsifySettings =
+  ## Return the settings registered under `name`. An unknown name fails
+  ## loud — a typo in a profile name must not silently become defaults.
+  doAssert name in settingsProfiles,
+    "falsify: unknown settings profile: " & name
+  settingsProfiles[name]
+
 proc approxSize*[T](x: T): int =
   ## Order-of-magnitude byte size of `x`: the value itself plus, for
   ## anything with `len`, one level of element payload. Not exact — a
@@ -763,10 +804,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 classify: proc(x: T): seq[string] = nil,
                 cover: seq[CoverReq] = @[],
                 assume: proc(x: T): bool = nil,
-                maxDiscards: int = 500,
-                health: HealthChecks = defaultHealth(),
-                deadlineMs: int = 0,
-                maxShrinks: int = 0,
+                settings: FalsifySettings = defaultSettings(),
                 target: proc(x: T): float = nil): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
@@ -794,7 +832,17 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## from 0 to ~100 across the run, so recursive generators (`genRecursive`)
   ## start shallow and explore deeper structures in later cases.
   ##
-  ## Per-case deadline: `deadlineMs` (default 0 = disabled, Hypothesis
+  ## Tuning knobs: `settings` (default `defaultSettings()`) bundles the
+  ## sweep tuning — `maxDiscards`, `deadlineMs`, `maxShrinks`, `health` —
+  ## into one object instead of sixteen parameters at every call site.
+  ## The case count `n` stays positional: it is the most-set knob and
+  ## reads naturally there. `defineProfile` names a project-wide
+  ## convention once (CI runs deep, local runs fast) and `withProfile`
+  ## recalls it at each call site; an unknown profile name fails loud
+  ## rather than silently becoming defaults. Default settings give
+  ## byte-identical sweep streams to the old parameter defaults.
+  ##
+  ## Per-case deadline: `settings.deadlineMs` (default 0 = disabled, Hypothesis
   ## `deadline` style) bounds how long one property evaluation may take.
   ## When a case exceeds the deadline, the sweep aborts immediately with a
   ## `DEADLINE [name]` line (case index, elapsed ms, and the seed so the
@@ -817,9 +865,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## deadline aborts. The DEADLINE line therefore reports the raw
   ## (unshrunk) case via the seed, not a minimal input.
   ##
-  ## Shrink budget: `maxShrinks` (default 0 = unbounded, today's behavior)
+  ## Shrink budget: `settings.maxShrinks` (default 0 = unbounded, today's behavior)
   ## caps the number of shrink candidates evaluated after a failure.
-  ## `deadlineMs` bounds the per-case *check*; the budget bounds the
+  ## `settings.deadlineMs` bounds the per-case *check*; the budget bounds the
   ## *shrink phase* — a pathological shrinker emitting enormous candidate
   ## lists (deep or cyclic structures) can't spin the loop for minutes
   ## while the user waits for the counterexample shrinking already found.
@@ -845,7 +893,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## exactly as in a blind run. The best score is reported in the ok line
   ## when targeting is on. Targeting applies to the random sweep only, not
   ## to regression replays (replays are fixed failing cases, like
-  ## `classify` and health).
+  ## `classify` and the health checks).
   ##
   ## Unlike Hypothesis's `target()`, which the test body calls
   ## mid-execution, falsify's score is a pure function of the generated
@@ -856,7 +904,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## size): compute the magnitude from the input and score it.
   ##
   ## The score function never touches the RNG (the same read-only
-  ## discipline as `classify` and health): same seed gives the identical
+  ## discipline as `classify` and the health checks): same seed gives the identical
   ## score stream and the identical best-input trajectory, so the seed
   ## discipline holds. With `target` unset the case stream is byte-identical
   ## to today — targeting changes the stream by construction (mutation
@@ -885,7 +933,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## (QuickCheck `==>`). A case failing `assume` is *discarded* — counted
   ## and reported in the ok line (`ok [name]: 200 cases, 37 discarded`),
   ## never a failure, and never classified. If discards exceed
-  ## `maxDiscards` (default 500) the run aborts with a gave-up line and
+  ## `settings.maxDiscards` (default 500) the run aborts with a gave-up line and
   ## returns false: an unsatisfiable precondition fails loud instead of
   ## spinning. An exception or defect *inside* `assume` is a programming
   ## error and fails the run like a property failure.
@@ -901,19 +949,19 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## `genSuchThat`: a precondition that discards most cases is usually a
   ## generator that should have produced satisfying cases directly.
   ##
-  ## Health checks: `health` (default `defaultHealth()`) watches the sweep
+  ## Health checks: `settings.health` (default `defaultHealth()`) watches the sweep
   ## for degenerate shapes a green run would otherwise hide — Hypothesis
   ## `HealthCheck` style. `hcTooSlow` (mean per-case property time, in ms,
   ## generation excluded), `hcDataTooLarge` (mean `approxSize` of the
   ## generated input, in bytes), `hcDiscardHeavy` (discards per evaluated
-  ## case — the soft warning before `maxDiscards`' hard abort), and
+  ## case — the soft warning before `settings.maxDiscards`' hard abort), and
   ## `hcFewExamples` (fewer than `minExamples` cases evaluated). Tripped
   ## checks print `HEALTH [name]` lines and warn by default; listing a
   ## check in `failOn` makes it fail the run instead. Health covers the
   ## random sweep only, like classification — and like classification it
   ## never perturbs the stream: timing and measuring are read-only on the
   ## RNG, so the same seed gives the identical cases with or without
-  ## `health`. Timing is per-case wall clock at millisecond resolution —
+  ## `settings.health`. Timing is per-case wall clock at millisecond resolution —
   ## coarse by design; it is a CI-shape heuristic, not a profiler.
   ##
   ## Regression corpus: `regressions` is a list of seeds replayed *before*
@@ -940,12 +988,12 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## An example failing `assume` is a programming error, not a discard —
   ## it fails the run (a hand-written input that violates the
   ## precondition is a bug in the test, not in the generator). Examples
-  ## are outside classification, coverage, health, targeting, and the
+  ## are outside classification, coverage, the health checks, targeting, and the
   ## per-case deadline: they are deliberate, not sampled, and measuring
   ## them would distort the sweep's statistics.
   proc shrinkMinimal(x: T): tuple[val: T, budgetExhausted: bool] =
     ## Greedy-shrink `x` to a minimal still-failing input (candidates
-    ## most-aggressive first), honoring the `maxShrinks` budget.
+    ## most-aggressive first), honoring the `settings.maxShrinks` budget.
     ## `prop` exceptions/defects count as failures, same as in the sweep.
     result = (x, false)
     if shrink == nil: return result
@@ -954,7 +1002,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     while cands.len > 0:
       var progressed = false
       for c in cands:
-        if maxShrinks > 0 and shrinksUsed >= maxShrinks:
+        if settings.maxShrinks > 0 and shrinksUsed >= settings.maxShrinks:
           return (result[0], true)
         inc shrinksUsed
         var cf = false
@@ -1008,12 +1056,12 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         let (minimal, budgetExhausted) = shrinkMinimal(x)
         var failLine = "FAIL [" & name & "]: example " & $ei & ": " & $x &
           ", minimal input: " & $minimal
-        if maxShrinks > 0:
+        if settings.maxShrinks > 0:
           if budgetExhausted:
-            failLine &= " (shrink budget " & $maxShrinks &
+            failLine &= " (shrink budget " & $settings.maxShrinks &
               " exhausted, may not be minimal)"
           else:
-            failLine &= " (shrunk to minimum, budget " & $maxShrinks & ")"
+            failLine &= " (shrunk to minimum, budget " & $settings.maxShrinks & ")"
         echo failLine
         return false
 
@@ -1050,9 +1098,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
           return false
         if not holds:
           inc discards
-          if discards > maxDiscards:
+          if discards > settings.maxDiscards:
             echo "FAIL [", name, "]: gave up: discarded ", discards,
-              " > maxDiscards ", maxDiscards, " cases"
+              " > maxDiscards ", settings.maxDiscards, " cases"
             return false
           continue
       if not isReplay and target != nil:
@@ -1089,9 +1137,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
         failed = true
       let caseMs = inMilliseconds(getMonoTime() - t0).float
-      if deadlineMs > 0 and caseMs > deadlineMs.float:
+      if settings.deadlineMs > 0 and caseMs > settings.deadlineMs.float:
         echo "DEADLINE [", name, "]: case ", i, " took ",
-          formatFloat(caseMs, ffDecimal, 1), "ms > ", deadlineMs,
+          formatFloat(caseMs, ffDecimal, 1), "ms > ", settings.deadlineMs,
           "ms deadline, seed: ", rr.seed
         return false
       if not isReplay:
@@ -1102,12 +1150,12 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         let (minimal, budgetExhausted) = shrinkMinimal(x)
         var failLine = "FAIL [" & name & "]: seed: " & $rr.seed & ", case " & $i &
           ", minimal input: " & $minimal
-        if maxShrinks > 0:
+        if settings.maxShrinks > 0:
           if budgetExhausted:
-            failLine &= " (shrink budget " & $maxShrinks &
+            failLine &= " (shrink budget " & $settings.maxShrinks &
               " exhausted, may not be minimal)"
           else:
-            failLine &= " (shrunk to minimum, budget " & $maxShrinks & ")"
+            failLine &= " (shrunk to minimum, budget " & $settings.maxShrinks & ")"
         echo failLine
         return false
     if isReplay:
@@ -1116,7 +1164,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       if classify != nil:
         if not reportCoverage(name, counts, n, cover): return false
       if not reportHealth(name, totalMs, totalBytes, evaluated, discards,
-                          health): return false
+                          settings.health): return false
       var line = "ok [" & name & "]: " & $n & " cases"
       if examples.len > 0:
         line = "ok [" & name & "]: " & $examples.len & " examples, " & $n &
@@ -1128,8 +1176,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       echo line
   doAssert classify != nil or cover.len == 0,
     "forAll: `cover` requires `classify`"
-  doAssert deadlineMs >= 0, "forAll: `deadlineMs` must be non-negative"
-  doAssert maxShrinks >= 0, "forAll: `maxShrinks` must be non-negative"
+  doAssert settings.deadlineMs >= 0, "forAll: `settings.deadlineMs` must be non-negative"
+  doAssert settings.maxShrinks >= 0, "forAll: `settings.maxShrinks` must be non-negative"
   result = true
   if not runExamples(): return false
   for seed in regressions:
