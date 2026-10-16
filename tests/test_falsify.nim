@@ -1496,6 +1496,85 @@ if pos >= 0:
 check("forAll with shrinkSuchThat reports an even minimal input",
   "minimal input: " in outSuch and minIn >= 0 and minIn mod 2 == 0)
 
+# --- Explicit examples (issue #41) ---
+
+# A failing example fails the run immediately; the value is printed and
+# is the whole replay recipe (no seed). It shrinks like a sweep failure.
+var exFailResult = true
+var exFailR = initRng(424242)
+let exFailOut = captureOutput:
+  exFailResult = forAll("ex-fail", exFailR, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = x <= 7,
+    shrinkInt,
+    examples = @[100])
+check("failing example fails the run", not exFailResult)
+check("failing example prints the index and value",
+  "example 0" in exFailOut and "100" in exFailOut)
+check("failing example needs no seed in the report",
+  "seed" notin exFailOut)
+check("failing example shrinks to the minimal failing input",
+  "minimal input: 8" in exFailOut)
+
+# All-passing examples: green run, and the sweep stream is byte-identical
+# to a no-examples run (examples consume no RNG).
+var streamLog1: seq[int] = @[]
+var streamLog2: seq[int] = @[]
+proc loggingGen1(r: var Rng): int =
+  let v = r.genInt(0, 99)
+  streamLog1.add(v)
+  v
+proc loggingGen2(r: var Rng): int =
+  let v = r.genInt(0, 99)
+  streamLog2.add(v)
+  v
+var exOkR1 = initRng(424242)
+var exOkR2 = initRng(424242)
+let ok1 = forAll("ex-ok", exOkR1, 50, loggingGen1,
+  proc(x: int): bool = true, examples = @[7, 8])
+let ok2 = forAll("ex-ok", exOkR2, 50, loggingGen2,
+  proc(x: int): bool = true)
+check("all-passing examples: green run", ok1 and ok2)
+check("examples consume no RNG: sweep stream byte-identical",
+  streamLog1 == streamLog2 and streamLog1.len == 50)
+let exOkOut = captureOutput:
+  var rr = initRng(1)
+  discard forAll("ex-okline", rr, 10,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = true, examples = @[1, 2, 3])
+check("ok line names the examples count",
+  "3 examples, 10 cases" in exOkOut)
+
+# Order: examples first, then regression replays, then the sweep.
+# Examples sit outside the generator's range so the log distinguishes them.
+var evalOrder: seq[string] = @[]
+var exOrdR = initRng(424242)
+discard captureOutput:
+  discard forAll("ex-order", exOrdR, 20,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool =
+      evalOrder.add(if x >= 1000: "example" else: "case")
+      true,
+    regressions = @[999'u64],
+    examples = @[1000, 2000])
+check("evaluation order: examples, then replays, then sweep",
+  evalOrder.len == 42 and evalOrder[0] == "example" and
+  evalOrder[1] == "example" and evalOrder[2] == "case" and
+  evalOrder[22] == "case" and "example" notin evalOrder[2 .. ^1])
+
+# An example failing `assume` is a programming error: it fails the run,
+# it is never silently discarded.
+var exAssR = initRng(424242)
+let exAssOut = captureOutput:
+  discard forAll("ex-assume", exAssR, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = true,
+    assume = proc(x: int): bool = x != 7,
+    examples = @[7])
+check("example failing assume fails the run (not discarded)",
+  "failed assume" in exAssOut and "gave up" notin exAssOut and
+  "discarded" notin exAssOut)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
