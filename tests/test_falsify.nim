@@ -729,6 +729,63 @@ check("short-string property shrinks to empty",
   "FAIL [string-len]" in stringOut and "minimal input: " in stringOut and
   stringOut.find("minimal input: \n") >= 0)
 
+# genMap: draws exactly gen's draws, transformed.
+var rMap = initRng(99)
+var mapOk = true
+for _ in 0 ..< 200:
+  let v = rMap.genMap(proc(r: var Rng): int = r.genInt(0, 9),
+                      proc(x: int): int = 2 * x)
+  if v mod 2 != 0 or v < 0 or v > 18: mapOk = false
+check("genMap transforms drawn values", mapOk)
+
+# genMap: same seed -> same stream as the underlying generator's draws.
+var rMapA = initRng(1234)
+var rMapB = initRng(1234)
+var mapDet = true
+for _ in 0 ..< 50:
+  let a = rMapA.genMap(proc(r: var Rng): int = r.genInt(-100, 100),
+                       proc(x: int): int = x + 1)
+  let b = rMapB.genInt(-100, 100) + 1
+  if a != b: mapDet = false
+check("genMap draws equal underlying generator draws", mapDet)
+
+# genBind: sequencing is literal — genBind(gen, k) == let x = gen(r) in k(r, x).
+var rBindA = initRng(777)
+var rBindB = initRng(777)
+var bindSeq = true
+for _ in 0 ..< 50:
+  let a = rBindA.genBind(proc(r: var Rng): int = r.genInt(1, 8),
+                         proc(r: var Rng, n: int): seq[bool] =
+                           r.genSeq(n, genBool))
+  let n = rBindB.genInt(1, 8)
+  let b = rBindB.genSeq(n, genBool)
+  if a != b: bindSeq = false
+check("genBind sequences gen then continuation", bindSeq)
+
+# genBind: the drawn value reaches the continuation — encode it in the output
+# and compare against the manual sequence.
+var rBindTh = initRng(31337)
+var rBindThM = initRng(31337)
+var bindThread = true
+for _ in 0 ..< 50:
+  let a = rBindTh.genBind(proc(r: var Rng): int = r.genInt(1, 8),
+                          proc(r: var Rng, n: int): int =
+                            n * 1000 + r.genInt(0, 9))
+  let n = rBindThM.genInt(1, 8)
+  let b = n * 1000 + rBindThM.genInt(0, 9)
+  if a != b: bindThread = false
+check("genBind threads the drawn value", bindThread)
+
+# End-to-end: genMap inside a forAll property.
+var rMapProp = initRng(424242)
+check("forAll with genMap generator passes",
+  forAll("map-double", rMapProp, 100,
+    proc(r: var Rng): int =
+      r.genMap(proc(r: var Rng): int = r.genInt(-50, 50),
+                proc(x: int): int = 2 * x),
+    proc(x: int): bool = x mod 2 == 0,
+    shrinkInt))
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

@@ -234,6 +234,32 @@ proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
     " draws; narrow the generator (build the constraint into generation)" &
     " rather than filtering a wide one")
 
+proc genMap*[T, U](r: var Rng, gen: proc(r: var Rng): T,
+                   f: proc(x: T): U): U =
+  ## Draw one value from `gen` and apply `f` — the functor map for
+  ## generators (QuickCheck `fmap`).
+  ##
+  ## `f` takes only the drawn value, never the RNG, so mapping never
+  ## perturbs the stream: the draws are exactly `gen`'s draws. Like every
+  ## other `proc` parameter in this library, `f` must not capture locals
+  ## (a capturing lambda infers `{.closure.}` and won't match); to use a
+  ## captured value, thread it through generation with `genBind` instead.
+  f(gen(r))
+
+proc genBind*[T, U](r: var Rng, gen: proc(r: var Rng): T,
+                    k: proc(r: var Rng, x: T): U): U =
+  ## Draw `x` from `gen`, then run the continuation generator `k(x)` —
+  ## the monadic bind for generators (QuickCheck `>>=`).
+  ##
+  ## This is the size-then-payload pattern: `genBind(r.genInt(1, 8),
+  ## proc(r: var Rng, n: int): seq[bool] = r.genSeq(n, genBool))` draws a
+  ## length, then a payload of exactly that length — no capture needed,
+  ## the drawn value is threaded as an argument. Sequencing is literal:
+  ## `genBind(gen, k)` draws exactly what `gen` draws followed by what
+  ## `k(x)` draws, so the seed discipline is unchanged.
+  let x = gen(r)
+  k(r, x)
+
 proc genPair*[T, U](r: var Rng, genT: proc(r: var Rng): T,
                     genU: proc(r: var Rng): U): (T, U) =
   ## Pair from two element generators — the multi-input building block.
