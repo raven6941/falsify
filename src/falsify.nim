@@ -248,24 +248,24 @@ proc enumValuesOf[T: enum](): seq[T] =
   ## ordinal range directly; holey enums (explicit ordinals with gaps)
   ## probe each ordinal and keep only the ones `symbolRank` accepts —
   ## it raises `IndexDefect` exactly on hole ordinals, so a hole can
-  ## never leak into the value list (a bare `T(o)` cast would silently
-  ## produce an invalid value). The `HoleEnumConv` warning on the probe
-  ## cast is intentional: the probe *is* the validity check.
+  ## never leak into the value list. The probe uses an unchecked
+  ## `cast` (not `T(o)`): the conversion is deliberately unchecked
+  ## because `symbolRank` *is* the validity check, and `cast` keeps the
+  ## build warning-clean on Nim 2.0.x, where the `HoleEnumConv`
+  ## suppression pragma is not honored.
   var cached {.global.}: seq[T]
   if cached.len == 0:
     when T is Ordinal:
       for o in ord(low(T))..ord(high(T)):
         cached.add T(o)
     else:
-      {.push warning[HoleEnumConv]: off.}
       for o in ord(low(T))..ord(high(T)):
-        let v = T(o)
+        let v = cast[T](o)
         try:
           discard symbolRank(v)
           cached.add v
         except IndexDefect:
           discard
-      {.pop.}
   cached
 
 proc genEnum*[T: enum](r: var Rng, t: typedesc[T]): T =

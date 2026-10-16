@@ -2,7 +2,17 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        nim: ["2.0.8", "2.2.12"]
+        exclude:
+          # macOS on the older toolchain is enough of a signal; keep the
+          # matrix small.
+          - os: macos-latest
+            nim: "2.0.8"
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Nim
@@ -10,6 +20,6 @@ jobs:
           curl -sSf https://nim-lang.org/choosenim/init.sh | sh -s -- -y
           echo "$HOME/.nimble/bin" >> $GITHUB_PATH
       - name: Select Nim version
-        run: choosenim 2.2.12
+        run: choosenim ${{ matrix.nim }}
       - name: Test
         run: nim c -r --hints:off --path:src tests/test_falsify.nim

@@ -32,6 +32,23 @@ An `assert` (or any defect) in the property or the code under test is a
 failure, not a crash: it is reported with the seed + minimal input like
 any other failure, and `forAll` returns `false` so the suite continues.
 
+## Installation
+
+Requires Nim >= 2.0.0. From the Nimble package directory:
+
+```sh
+nimble install falsify
+```
+
+Or straight from source:
+
+```sh
+nimble install https://github.com/raven6941/falsify
+```
+
+Then `import falsify` in your test files. Zero dependencies beyond the
+stdlib; the whole library is the single module `src/falsify.nim`.
+
 ## Edge-biased generation
 
 Uniform random generation is boring: `genInt(-1000, 1000)` almost never
@@ -686,7 +703,7 @@ use.
 - **Generators**: `genBool`, `genInt(lo, hi)`, `genFloat(lo, hi)`,
   `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
   `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`,
-  `genPermutation(n)`, `genShuffle[T](xs)`,
+  `genEnum[T](t)`, `genPermutation(n)`, `genShuffle[T](xs)`,
   `genSuchThat[T](gen, pred, maxRetries = 100)`,
   `genMap[T, U](r, gen, f)`, `genBind[T, U](r, gen, k)`,
   `genPair[T, U]`, `genTriple[T, U, V]`,
@@ -694,14 +711,17 @@ use.
   `genSubseq[T](xs)`, `genUniqueInts(lo, hi, n)`
 - **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
   `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`,
-  `shrinkSuchThat[T](x, shrinkElem, pred)`
+  `shrinkSuchThat[T](x, shrinkElem, pred)`, `shrinkEnum[T](x)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
   examples = @[], classify = nil, cover = @[], assume = nil,
-  settings = defaultSettings())`; coverage requirements are
-  `CoverReq` = `tuple[tag: string, minPct: float]`
+  settings = defaultSettings(), target = nil)`; coverage requirements are
+  `CoverReq` = `tuple[tag: string, minPct: float]`. `target` is an optional
+  pure scoring function enabling Hypothesis-style targeted generation.
 - **Settings**: `FalsifySettings` (`maxDiscards`, `deadlineMs`, `maxShrinks`,
-  `health`), `defaultSettings()`, `defineProfile(name, s)`,
-  `withProfile(name)`
+  `health`, `verbosity`), `defaultSettings()`, `defineProfile(name, s)`,
+  `withProfile(name)`; `Verbosity` = `vQuiet` / `vNormal` / `vVerbose`.
+- **Health**: `HealthCheck` enum, `HealthChecks`, `defaultHealth()`; the
+  pure `trippedChecks(...)` helper reports which checks a sweep tripped.
 - **Stateful**: `runCommands[C, M, Sys](name, r, n, maxLen, genCmd, newModel,
   newSys, run, shrinkCmd = nil, regressions = @[])`, plus `replayCmds` and
   `shrinkCmdSeq` for manual sequence replay and shrinking
