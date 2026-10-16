@@ -234,6 +234,10 @@ most-aggressive first. The pattern (see `shrinkInt`):
 2. Try small steps toward zero (neighbor, single-element drops).
 3. Try halving / structural simplifications.
 
+`shrinkFloat` follows the same pattern with 0.0 as zero; `shrinkChar` uses
+`' '` (also `genChar`'s lower bound); `shrinkString` is the `shrinkSeq`
+algorithm specialized to strings, composing `shrinkChar` per character.
+
 `forAll` greedily follows the first candidate that still fails, so ordering
 matters more than exhaustiveness.
 
@@ -246,8 +250,8 @@ matters more than exhaustiveness.
   `genSuchThat[T](gen, pred, maxRetries = 100)`,
   `genPair[T, U]`, `genTriple[T, U, V]`,
   `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
-- **Shrinkers**: `shrinkInt`, `shrinkSeq[T](s, shrinkElem)`,
-  `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
+- **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
+  `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
   classify = nil, cover = @[])`; coverage requirements are `CoverReq`
   = `tuple[tag: string, minPct: float]`

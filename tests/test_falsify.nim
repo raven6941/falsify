@@ -2,6 +2,7 @@
 ## shrink to minimal counterexamples, and stay deterministic per seed.
 
 import falsify
+import std/math
 
 var failures = 0
 template check(name: string, cond: bool) =
@@ -669,6 +670,64 @@ let dupOut = captureOutput(block:
     classify = proc(x: int): seq[string] = @["a", "a", "b"]))
 check("duplicate tags counted once per case",
   "\"a\": 100.0% (100/100)" in dupOut and "\"b\": 100.0% (100/100)" in dupOut)
+
+# --- Shrinker completeness: shrinkFloat, shrinkChar, shrinkString (#18) ---
+
+# shrinkFloat: 0.0 first, then halving toward zero.
+let sf8 = shrinkFloat(8.0)
+check("shrinkFloat most aggressive first",
+  sf8.len > 2 and sf8[0] == 0.0 and sf8[1] == 4.0 and sf8[2] == 2.0)
+check("shrinkFloat converges toward zero",
+  sf8[^1] == 0.0 or abs(sf8[^1]) < 1e-300)
+check("shrinkFloat NaN shrinks to 0.0 only",
+  shrinkFloat(NaN) == @[0.0])
+check("shrinkFloat infinities shrink to 0.0",
+  shrinkFloat(Inf) == @[0.0] and shrinkFloat(-Inf) == @[0.0])
+check("shrinkFloat of 0.0 has no candidates", shrinkFloat(0.0) == @[])
+
+# End-to-end: a float threshold property shrinks to 0.0.
+proc floatThreshRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("float-thresh", r, 500,
+    proc(r: var Rng): float = r.genFloat(0.0, 10.0),
+    proc(x: float): bool = x >= 5.0,
+    shrinkFloat)
+let floatOut = captureOutput(floatThreshRun(424242))
+check("float threshold shrinks to minimal 0.0",
+  "FAIL [float-thresh]" in floatOut and "minimal input: 0.0" in floatOut)
+
+# shrinkChar: ' ' first, then neighbor toward ' ', then halving.
+let scd = shrinkChar('d')
+check("shrinkChar most aggressive first",
+  scd.len > 2 and scd[0] == ' ' and scd[1] == 'c')
+check("shrinkChar of space has no candidates", shrinkChar(' ') == @[])
+check("shrinkChar stays in printable range for generated chars",
+  block:
+    var okc = true
+    for o in 32 .. 126:
+      for c in shrinkChar(chr(o)):
+        if ord(c) < 32 or ord(c) > 126: okc = false
+    okc)
+
+# shrinkString: "", halves, single drops, per-char shrinks.
+let ssabc = shrinkString("abc")
+check("shrinkString most aggressive first",
+  ssabc.len > 3 and ssabc[0] == "" and "bc" in ssabc and "ab" in ssabc)
+check("shrinkString composes shrinkChar",
+  " z" in shrinkString("zz") and "z " in shrinkString("zz"))
+check("shrinkString of empty has no candidates", shrinkString("") == @[])
+
+# End-to-end: a short-string property shrinks to "".
+proc stringLenRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("string-len", r, 200,
+    proc(r: var Rng): string = r.genString(5),
+    proc(s: string): bool = s.len >= 2,
+    shrinkString)
+let stringOut = captureOutput(stringLenRun(424242))
+check("short-string property shrinks to empty",
+  "FAIL [string-len]" in stringOut and "minimal input: " in stringOut and
+  stringOut.find("minimal input: \n") >= 0)
 
 if failures > 0:
   echo failures, " self-test(s) failed"
