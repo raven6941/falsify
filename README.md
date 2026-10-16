@@ -250,6 +250,35 @@ filtering. A precondition that discards most cases is usually a generator
 that should have produced satisfying cases directly (same guidance as
 `genSuchThat`).
 
+## Per-case deadline
+
+A property whose single case takes minutes turns the run into a hanging
+CI job with no output and no seed recipe. Pass `deadlineMs` (Hypothesis
+`deadline` style) and a case that runs longer aborts the sweep:
+
+```nim
+let ok = forAll("solver-prop", r, 200, gen, prop, shrink, deadlineMs = 500)
+```
+
+```
+DEADLINE [solver-prop]: case 7 took 2312.0ms > 500ms deadline, seed: 424242
+```
+
+The abort returns false — the same failure protocol as a property
+failure, so the suite continues with later properties. The seed on the
+line makes the run replayable, like the FAIL line's recipe. Generation
+time is excluded from the measurement: the timer starts after `gen`
+returns, the same convention as the `hcTooSlow` health check.
+
+This is *cooperative*: the deadline is checked at the case boundary, so
+it cannot interrupt a truly infinite loop inside the property — true
+preemption needs threads, which are out of scope. What the deadline buys
+is fail-fast feedback for the common slow case instead of a silent hang.
+The abort skips the shrink phase on purpose: shrinking would re-run the
+slow property once per candidate, which is the hang the deadline just
+avoided. `deadlineMs = 0` (the default) disables it and reproduces
+current behavior exactly — same seed, byte-identical output.
+
 ## Coverage
 
 A green run says "200 cases passed" — but what *were* those cases? Pass an
@@ -363,7 +392,8 @@ matters more than exhaustiveness.
 - **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
   `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
-  classify = nil, cover = @[], assume = nil, maxDiscards = 500)`; coverage requirements are `CoverReq`
+  classify = nil, cover = @[], assume = nil, maxDiscards = 500,
+  health = defaultHealth(), deadlineMs = 0)`; coverage requirements are `CoverReq`
   = `tuple[tag: string, minPct: float]`
 
 Zero dependencies beyond the stdlib. Single module.

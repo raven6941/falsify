@@ -955,6 +955,54 @@ proc failingHealthRun(seed: uint64, withHealth: bool): string =
 check("health on/off: identical failure output",
   failingHealthRun(424242, true) == failingHealthRun(424242, false))
 
+# --- Per-case deadline (issue #26) ---
+
+# A deliberately slow property aborts the sweep with a DEADLINE line.
+proc slowCaseRun(deadline: int): tuple[ok: bool, outp: string] =
+  var r = initRng(13)
+  var ok = false
+  let o = captureOutput:
+    ok = forAll("hangy", r, 50,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = (os.sleep(500); x >= 0),
+      shrinkInt,
+      deadlineMs = deadline)
+  (ok, o)
+
+let (deadOk, deadOut) = slowCaseRun(50)
+check("slow case aborts the sweep", not deadOk)
+check("DEADLINE line names the property and case",
+  "DEADLINE [hangy]: case " in deadOut)
+check("DEADLINE line reports elapsed vs deadline",
+  " took " in deadOut and "ms > 50ms deadline" in deadOut)
+check("DEADLINE line carries the replay seed", "seed: 13" in deadOut)
+check("deadline abort skips the shrink phase",
+  "minimal input" notin deadOut)
+
+# A fast property under a generous deadline passes untouched.
+var rFastD = initRng(21)
+var fastDOk = false
+let fastDOut = captureOutput:
+  fastDOk = forAll("snappy", rFastD, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = x >= 0,
+    shrinkInt,
+    deadlineMs = 10_000)
+check("fast property passes under a generous deadline", fastDOk)
+check("no DEADLINE line when no case is slow", "DEADLINE" notin fastDOut)
+
+# deadlineMs=0 is the default: same seed -> byte-identical failure output.
+proc failingPropDeadlineRun(seed: uint64, deadline: int): string =
+  var r = initRng(seed)
+  captureOutput:
+    discard forAll("replay-me", r, 100,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x <= 7,
+      shrinkInt,
+      deadlineMs = deadline)
+check("deadlineMs=0 reproduces current behavior byte-for-byte",
+  failingPropDeadlineRun(424242, 0) == outA)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

@@ -572,7 +572,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 cover: seq[CoverReq] = @[],
                 assume: proc(x: T): bool = nil,
                 maxDiscards: int = 500,
-                health: HealthChecks = defaultHealth()): bool =
+                health: HealthChecks = defaultHealth(),
+                deadlineMs: int = 0): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
   ## case, then return false. Returns true iff all cases pass.
@@ -598,6 +599,29 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## The ambient generation size (`r.size`, see `genSized`) grows linearly
   ## from 0 to ~100 across the run, so recursive generators (`genRecursive`)
   ## start shallow and explore deeper structures in later cases.
+  ##
+  ## Per-case deadline: `deadlineMs` (default 0 = disabled, Hypothesis
+  ## `deadline` style) bounds how long one property evaluation may take.
+  ## When a case exceeds the deadline, the sweep aborts immediately with a
+  ## `DEADLINE [name]` line (case index, elapsed ms, and the seed so the
+  ## run is replayable) and `forAll` returns false — the same failure
+  ## protocol as a property failure, so the suite continues with later
+  ## properties. Generation time is excluded from the measurement: the
+  ## timer starts after `gen` returns, the same convention as
+  ## `hcTooSlow`'s mean case time.
+  ##
+  ## This is *cooperative*, not preemptive: it detects a slow case at the
+  ## case boundary and aborts the sweep, but it cannot interrupt a truly
+  ## infinite loop inside the property. True preemption needs threads and
+  ## is out of scope — a hanging property still hangs `forAll`. What the
+  ## deadline buys is fail-fast feedback for the common case: a property
+  ## whose single case takes minutes turns a silent hanging CI job into a
+  ## loud, seed-attributed abort.
+  ##
+  ## The abort skips the shrink phase on purpose: shrinking would re-run
+  ## the slow property once per candidate, which is exactly the hang the
+  ## deadline aborts. The DEADLINE line therefore reports the raw
+  ## (unshrunk) case via the seed, not a minimal input.
   ##
   ## Coverage: `classify` bins each generated case into named classes and
   ## `forAll` prints the observed distribution after the sweep, QuickCheck
@@ -716,9 +740,15 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       except Defect as d:
         echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
         failed = true
+      let caseMs = inMilliseconds(getMonoTime() - t0).float
+      if deadlineMs > 0 and caseMs > deadlineMs.float:
+        echo "DEADLINE [", name, "]: case ", i, " took ",
+          formatFloat(caseMs, ffDecimal, 1), "ms > ", deadlineMs,
+          "ms deadline, seed: ", rr.seed
+        return false
       if not isReplay:
         inc evaluated
-        totalMs += inMilliseconds(getMonoTime() - t0).float
+        totalMs += caseMs
       if failed:
         result = false
         var minimal = x
@@ -753,6 +783,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         echo "ok [", name, "]: ", n, " cases"
   doAssert classify != nil or cover.len == 0,
     "forAll: `cover` requires `classify`"
+  doAssert deadlineMs >= 0, "forAll: `deadlineMs` must be non-negative"
   result = true
   for seed in regressions:
     var rr = initRng(seed)
