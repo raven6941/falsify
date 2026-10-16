@@ -288,6 +288,12 @@ proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
   ## tells you the generator is too narrow for the predicate (or the
   ## predicate too strict for the generator), and the fix is on one of
   ## those two, not on the cap.
+  ##
+  ## Pair every `genSuchThat(gen, pred)` with `shrinkSuchThat(x, shrinkElem,
+  ## pred)` using the same predicate: the shrink phase evaluates `prop`
+  ## on raw shrink candidates, so a predicate-blind shrinker lets the
+  ## reported minimal counterexample wander outside the generated input
+  ## space (see `shrinkSuchThat`).
   doAssert maxRetries > 0, "genSuchThat: maxRetries must be positive"
   for _ in 0 ..< maxRetries:
     let x = gen(r)
@@ -296,6 +302,32 @@ proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
     "genSuchThat: predicate not satisfied after " & $maxRetries &
     " draws; narrow the generator (build the constraint into generation)" &
     " rather than filtering a wide one")
+
+proc shrinkSuchThat*[T](x: T, shrinkElem: proc(x: T): seq[T],
+                       pred: proc(x: T): bool): seq[T] =
+  ## Shrink candidates for a `genSuchThat`-constrained value: the
+  ## candidates of `shrinkElem(x)` filtered to those satisfying `pred`,
+  ## order preserved (filtering keeps most-aggressive-first).
+  ##
+  ## Without this, a constrained property's shrink phase evaluates `prop`
+  ## on candidates outside the generated input space. A candidate that
+  ## violates the predicate can *fail* the property and become the
+  ## reported "minimal input" even though the generator could never
+  ## produce it — or *pass* it vacuously and stall the shrink at a
+  ## non-minimal point. Concrete: generator = even ints, prop =
+  ## `x mod 4 == 0`. `shrinkInt(10)` proposes 9, and `prop(9)` is false,
+  ## so a predicate-blind shrink reports 9 (or 1, or 3) as the minimal
+  ## counterexample — none of them in the input space. With
+  ## `shrinkSuchThat(10, shrinkInt, isEven)` the candidates are `[0, 2]`
+  ## and the counterexample shrinks to 2, the minimal *even* failure.
+  ##
+  ## If filtering empties the list, `x` is minimal *within the constraint*:
+  ## the result is `@[]`, with no fallback to unfiltered candidates (a
+  ## fallback would reintroduce the off-space shrink this exists to
+  ## prevent).
+  result = @[]
+  for c in shrinkElem(x):
+    if pred(c): result.add(c)
 
 proc genMap*[T, U](r: var Rng, gen: proc(r: var Rng): T,
                    f: proc(x: T): U): U =

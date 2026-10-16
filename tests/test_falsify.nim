@@ -3,6 +3,7 @@
 
 import falsify
 import std/math
+import std/strutils
 
 var failures = 0
 template check(name: string, cond: bool) =
@@ -430,6 +431,48 @@ for _ in 0 ..< 50:
      rsu2.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99),
                       proc(x: int): bool = x mod 2 == 0): suchDet = false
 check("genSuchThat deterministic per seed", suchDet)
+
+# --- shrinkSuchThat: shrinking that stays inside the constraint ---
+
+proc isEven(x: int): bool = x mod 2 == 0
+
+# Candidates are filtered by the predicate, order preserved
+# (most-aggressive first): shrinkInt(10) = [0, 9, 5, 2, 1] -> [0, 2].
+check("shrinkSuchThat filters to the predicate, order preserved",
+  shrinkSuchThat(10, shrinkInt, isEven) == @[0, 2])
+
+# Empty-after-filter means minimal within the constraint: no fallback.
+check("shrinkSuchThat returns empty when no candidate satisfies pred",
+  shrinkSuchThat(4, shrinkInt, proc(c: int): bool = c == 4) == newSeq[int]())
+
+# The greedy shrink loop with a predicate-blind shrinker leaves the
+# constrained space: even ints, prop = x mod 4 == 0, failing at 10.
+# Blind shrinkInt adopts odd candidates that fail the property and
+# reports 1 -- a value the even-int generator could never produce.
+check("predicate-blind shrink reports an off-space minimal input",
+  shrinkLoop(10, proc(c: int): bool = not (c mod 4 == 0)) == 1)
+
+# The same loop with shrinkSuchThat stays in-space and reaches the
+# minimal even failure, 2.
+proc shrinkLoopSuch(x: int, pred: proc(c: int): bool,
+                    fails: proc(c: int): bool): int =
+  var m = x
+  var cands = shrinkSuchThat(m, shrinkInt, pred)
+  while cands.len > 0:
+    var progressed = false
+    for c in cands:
+      if fails(c):
+        m = c
+        cands = shrinkSuchThat(m, shrinkInt, pred)
+        progressed = true
+        break
+    if not progressed: break
+  m
+check("shrinkSuchThat reaches minimal in-space counterexample 2",
+  shrinkLoopSuch(10, isEven, proc(c: int): bool = not (c mod 4 == 0)) == 2)
+
+# (forAll-level constrained-shrink test lives at the end of the file:
+# it needs the captureOutput template defined below.)
 
 # --- Sized and recursive generation ---
 
@@ -1355,6 +1398,32 @@ for _ in 0 ..< 2000:
   elif x == Inf or x == -Inf: inc optInf
 check("float specials: opt-in produces NaN and ±Inf",
   optNan > 0 and optInf > 0)
+
+# --- shrinkSuchThat at the forAll level (needs captureOutput above) ---
+
+# The reported minimal input of a constrained property satisfies the
+# predicate: the shrink phase never wanders off-space.
+proc failingConstrainedRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("constrained-even", r, 200,
+    proc(r: var Rng): int =
+      r.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99), isEven),
+    proc(x: int): bool = x mod 4 == 0,
+    proc(x: int): seq[int] = x.shrinkSuchThat(shrinkInt, isEven))
+
+let outSuch = captureOutput(failingConstrainedRun(424242))
+var minIn = -1
+let marker = "minimal input: "
+let pos = outSuch.find(marker)
+if pos >= 0:
+  var digits = ""
+  var i = pos + marker.len
+  while i < outSuch.len and outSuch[i] in {'0'..'9'}:
+    digits.add(outSuch[i])
+    inc i
+  if digits.len > 0: minIn = parseInt(digits)
+check("forAll with shrinkSuchThat reports an even minimal input",
+  "minimal input: " in outSuch and minIn >= 0 and minIn mod 2 == 0)
 
 if failures > 0:
   echo failures, " self-test(s) failed"

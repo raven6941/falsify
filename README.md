@@ -136,6 +136,30 @@ constraint into generation (e.g. `2 * r.genInt(0, 49)` for evens) — over
 heavy filtering. Filtering a wide generator is the retry-hunt equivalent of
 an unseeded stream: it works until it silently doesn't.
 
+A constrained property needs a constrained shrinker. Pair every
+`genSuchThat(gen, pred)` with `shrinkSuchThat(x, shrinkElem, pred)` using
+the *same* predicate:
+
+```nim
+let ok = forAll("even-div4", r, 200,
+  proc(r: var Rng): int =
+    r.genSuchThat(proc(r: var Rng): int = r.genInt(0, 99),
+                  proc(x: int): bool = x mod 2 == 0),
+  proc(x: int): bool = x mod 4 == 0,
+  proc(x: int): seq[int] =
+    x.shrinkSuchThat(shrinkInt, proc(x: int): bool = x mod 2 == 0))
+```
+
+The shrink phase evaluates `prop` on raw shrink candidates, so a
+predicate-blind shrinker lets the reported minimal counterexample wander
+outside the generated input space: above, `shrinkInt` proposes 9 for the
+failing input 10, `prop(9)` is false, and the run "shrinks" to 9 — a value
+the even-int generator could never produce. `shrinkSuchThat` filters the
+candidates through the predicate (`shrinkInt(10)` → `[0, 2]`), so the
+counterexample converges to 2: the minimal *even* failure. If no candidate
+satisfies the predicate, the value is minimal within the constraint and
+shrinking stops — there is no fallback to unfiltered candidates.
+
 ## Composing generators
 
 Generators compose like QuickCheck's `Gen`: `genMap` is `fmap`, `genBind`
@@ -543,7 +567,8 @@ use.
   `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`,
   `genSubseq[T](xs)`, `genUniqueInts(lo, hi, n)`
 - **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
-  `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
+  `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`,
+  `shrinkSuchThat[T](x, shrinkElem, pred)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
   classify = nil, cover = @[], assume = nil, maxDiscards = 500,
   health = defaultHealth(), deadlineMs = 0, maxShrinks = 0)`; coverage
