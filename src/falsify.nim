@@ -323,6 +323,59 @@ proc shrinkInt*(x: int): seq[int] =
     if v notin result: result.add(v)
     v = v div 2
 
+proc shrinkFloat*(x: float): seq[float] =
+  ## Shrink candidates for a float: 0.0 first, then halving toward zero.
+  ## Most-aggressive first. NaN shrinks to 0.0 only; infinities shrink to
+  ## 0.0 as well (halving cannot leave infinity, so there is nothing
+  ## between). Halving always terminates: each step strictly reduces the
+  ## magnitude until it underflows to 0.0.
+  result = @[]
+  if x != x:  # NaN
+    return @[0.0]
+  if x != 0.0: result.add(0.0)
+  var v = x / 2.0
+  while v != 0.0 and v != x:
+    if v notin result: result.add(v)
+    v = v / 2.0
+
+proc shrinkChar*(x: char): seq[char] =
+  ## Shrink candidates for a char: ' ' first, then the neighbor toward
+  ## ' ', then halving the ordinal distance toward ' '. Most-aggressive
+  ## first. ' ' is the char zero — the `shrinkInt` pattern with 0 replaced
+  ## by ' ', which is also `genChar`'s lower bound, so shrinking a
+  ## generated char stays inside the generator's range.
+  result = @[]
+  if x != ' ': result.add(' ')
+  if x > ' ': result.add(chr(ord(x) - 1))
+  elif x < ' ': result.add(chr(ord(x) + 1))
+  var v = ord(' ') + (ord(x) - ord(' ')) div 2
+  while v != ord(' ') and v != ord(x):
+    let c = chr(v)
+    if c notin result: result.add(c)
+    v = ord(' ') + (v - ord(' ')) div 2
+
+proc shrinkString*(s: string): seq[string] =
+  ## Shrink candidates for a string: empty, halves, single-char drops,
+  ## then per-character shrinks via `shrinkChar`. Most-aggressive first.
+  ## The `shrinkSeq` algorithm specialized to strings: no `seq[char]`
+  ## roundtrip, and the ordering contract is owned here.
+  result = @[]
+  if s.len == 0: return
+  result.add("")
+  let h = s.len div 2
+  if h > 0:
+    result.add(s[h .. ^1])
+    result.add(s[0 ..< h])
+  for i in 0 ..< s.len:
+    var t = s
+    t.delete(i .. i)
+    if t notin result: result.add(t)
+  for i in 0 ..< s.len:
+    for c in shrinkChar(s[i]):
+      var t = s
+      t[i] = c
+      if t notin result: result.add(t)
+
 proc shrinkSeq*[T](s: seq[T], shrinkElem: proc(x: T): seq[T]): seq[seq[T]] =
   ## Shrink candidates for a seq: empty, halves, single-element drops,
   ## then element-wise shrinks. Most-aggressive first.
