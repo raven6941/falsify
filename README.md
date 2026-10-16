@@ -357,7 +357,7 @@ ok [div-roundtrip]: 200 cases, 3 discarded
 ```
 
 A discarded case is counted and reported, never a failure, and never
-classified. If discards exceed `maxDiscards` (default 500) the run aborts
+classified. If discards exceed `settings.maxDiscards` (default 500) the run aborts
 with a gave-up line instead of spinning on an unsatisfiable precondition:
 
 ```
@@ -380,11 +380,14 @@ that should have produced satisfying cases directly (same guidance as
 ## Per-case deadline
 
 A property whose single case takes minutes turns the run into a hanging
-CI job with no output and no seed recipe. Pass `deadlineMs` (Hypothesis
-`deadline` style) and a case that runs longer aborts the sweep:
+CI job with no output and no seed recipe. Set `settings.deadlineMs`
+(Hypothesis `deadline` style) and a case that runs longer aborts the
+sweep:
 
 ```nim
-let ok = forAll("solver-prop", r, 200, gen, prop, shrink, deadlineMs = 500)
+var s = defaultSettings()
+s.deadlineMs = 500
+let ok = forAll("solver-prop", r, 200, gen, prop, shrink, settings = s)
 ```
 
 ```
@@ -403,18 +406,20 @@ preemption needs threads, which are out of scope. What the deadline buys
 is fail-fast feedback for the common slow case instead of a silent hang.
 The abort skips the shrink phase on purpose: shrinking would re-run the
 slow property once per candidate, which is the hang the deadline just
-avoided. `deadlineMs = 0` (the default) disables it and reproduces
-current behavior exactly — same seed, byte-identical output.
+avoided. `settings.deadlineMs = 0` (the default) disables it and
+reproduces current behavior exactly — same seed, byte-identical output.
 
 ## Shrink budget
 
-`deadlineMs` bounds the per-case *check*; `maxShrinks` bounds the *shrink
-phase* — a pathological shrinker emitting enormous candidate lists (deep
-or cyclic structures) can't spin the loop for minutes while you wait for
-the counterexample shrinking already found:
+`settings.deadlineMs` bounds the per-case *check*; `settings.maxShrinks`
+bounds the *shrink phase* — a pathological shrinker emitting enormous
+candidate lists (deep or cyclic structures) can't spin the loop for
+minutes while you wait for the counterexample shrinking already found:
 
 ```nim
-let ok = forAll("tree-prop", r, 200, gen, prop, shrinkTree, maxShrinks = 10_000)
+var s = defaultSettings()
+s.maxShrinks = 10_000
+let ok = forAll("tree-prop", r, 200, gen, prop, shrinkTree, settings = s)
 ```
 
 When the budget exhausts, `forAll` stops with the best counterexample
@@ -426,8 +431,8 @@ FAIL [tree-prop]: seed: 424242, case 0, minimal input: ... (shrink budget 10000 
 
 A shrink that finishes inside the budget reads `... (shrunk to minimum,
 budget 10000)`. Budget accounting is one counter and deterministic per
-seed. `maxShrinks = 0` (the default) is unbounded — today's behavior,
-byte-identical report lines, no change in shrink quality.
+seed. `settings.maxShrinks = 0` (the default) is unbounded — today's
+behavior, byte-identical report lines, no change in shrink quality.
 
 ## Coverage
 
@@ -478,9 +483,9 @@ exercised the edge cases" from a hope into a checked claim.
 A green sweep can still be degenerate: every case finishing in a
 microsecond means the generator found a trivial corner; every case taking
 seconds means CI can't afford the suite; a precondition discarding 95% of
-draws means the property is barely being tested. Pass `health` (default
-`defaultHealth()`) and `forAll` watches for these shapes — Hypothesis
-`HealthCheck` style — and prints a line per tripped check:
+draws means the property is barely being tested. Set `settings.health`
+(default `defaultHealth()`) and `forAll` watches for these shapes —
+Hypothesis `HealthCheck` style — and prints a line per tripped check:
 
 ```
 HEALTH [slow-prop]: too-slow: mean case time 63.2ms > 50.0ms
@@ -496,22 +501,63 @@ The four checks:
   (default 1 MiB). Size is `approxSize`: the value plus one level of
   element payload — order of magnitude, not exact.
 - `hcDiscardHeavy` — discards per evaluated case above `maxDiscardRatio`
-  (default 0.5). The soft warning before `maxDiscards`' hard abort.
+  (default 0.5). The soft warning before `settings.maxDiscards`' hard
+  abort.
 - `hcFewExamples` — fewer than `minExamples` (default 10) cases evaluated.
 
 Warnings by default — a green run stays green. List checks in `failOn` to
 make them fail the run instead:
 
 ```nim
-  health = HealthChecks(maxMeanCaseMs: 10.0, maxMeanInputBytes: 1 shl 20,
+var s = defaultSettings()
+s.health = HealthChecks(maxMeanCaseMs: 10.0, maxMeanInputBytes: 1 shl 20,
                         maxDiscardRatio: 0.5, minExamples: 10,
                         failOn: {hcTooSlow})
+# ... forAll("slow-prop", r, 200, gen, prop, settings = s)
 ```
 
 Health covers the random sweep only (like classification), and like
 classification it never perturbs the stream: timing and measuring are
 read-only on the RNG, so the same seed gives the identical cases with or
-without `health`. Set any threshold to 0 to disable that check.
+without a custom `settings.health`. Set any threshold to 0 to disable
+that check.
+
+## Settings profiles
+
+The tuning knobs — `maxDiscards`, `deadlineMs`, `maxShrinks`, `health` —
+live in one `FalsifySettings` object instead of sixteen parameters at
+every call site. The case count `n` stays positional (it is the most-set
+knob), and everything per-property (`gen`, `prop`, `shrink`,
+`regressions`, `examples`, `classify`, `cover`, `assume`, `target`)
+stays a `forAll` parameter: settings hold only tuning.
+
+`defaultSettings()` reproduces the old defaults exactly, so omitting
+`settings` changes nothing — same seed, byte-identical output.
+`defineProfile` names a project-wide convention once, `withProfile`
+recalls it. An unknown profile name fails loud: a typo must not silently
+become defaults.
+
+```nim
+# One place names the convention; every property references it.
+defineProfile("ci", block:
+  var s = defaultSettings()
+  s.deadlineMs = 30_000    # fail fast instead of hanging the CI job
+  s.maxShrinks = 100_000   # deep shrinks are cheap on CI hardware
+  s.health = HealthChecks(maxMeanCaseMs: 100.0, maxMeanInputBytes: 1 shl 20,
+                          maxDiscardRatio: 0.5, minExamples: 10,
+                          failOn: {hcTooSlow, hcDiscardHeavy})
+  s)
+defineProfile("local", defaultSettings())  # fast iteration, defaults
+
+let profile = getEnv("FALSIFY_PROFILE", "local")
+let ok = forAll("parser-roundtrip", r, 200, gen, prop, shrink,
+                settings = withProfile(profile))
+```
+
+CI runs `FALSIFY_PROFILE=ci nim c -r tests/...`; local runs use the
+defaults. (Breaking change, pre-1.0: the individual knob parameters
+`maxDiscards`, `deadlineMs`, `maxShrinks`, `health` were removed from
+`forAll` in favor of `settings`.)
 
 ## Targeted generation
 
@@ -638,9 +684,12 @@ use.
   `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`,
   `shrinkSuchThat[T](x, shrinkElem, pred)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
-  examples = @[], classify = nil, cover = @[], assume = nil, maxDiscards = 500,
-  health = defaultHealth(), deadlineMs = 0, maxShrinks = 0)`; coverage
-  requirements are `CoverReq` = `tuple[tag: string, minPct: float]`
+  examples = @[], classify = nil, cover = @[], assume = nil,
+  settings = defaultSettings())`; coverage requirements are
+  `CoverReq` = `tuple[tag: string, minPct: float]`
+- **Settings**: `FalsifySettings` (`maxDiscards`, `deadlineMs`, `maxShrinks`,
+  `health`), `defaultSettings()`, `defineProfile(name, s)`,
+  `withProfile(name)`
 - **Stateful**: `runCommands[C, M, Sys](name, r, n, maxLen, genCmd, newModel,
   newSys, run, shrinkCmd = nil, regressions = @[])`, plus `replayCmds` and
   `shrinkCmdSeq` for manual sequence replay and shrinking

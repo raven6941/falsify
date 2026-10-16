@@ -74,10 +74,12 @@ proc countingProp(x: int): bool =
 # Budget 10 on input 42: 1 sweep eval + exactly 10 shrink candidates.
 var rbB = initRng(1)
 shrinkEvals = 0
+var sBudget = defaultSettings()
+sBudget.maxShrinks = 10
 check("maxShrinks interrupts deep shrink",
   not forAll("budget-prop", rbB, 1,
     proc(r: var Rng): int = 42,
-    countingProp, decChain, maxShrinks = 10) and shrinkEvals == 11)
+    countingProp, decChain, settings = sBudget) and shrinkEvals == 11)
 
 # Default (0 = unbounded) terminates naturally with the true minimum 0:
 # 1 sweep + 42 one-candidate greedy steps.
@@ -91,18 +93,22 @@ check("maxShrinks default still shrinks to minimum",
 # An ample budget changes nothing vs unbounded.
 var rgB = initRng(1)
 shrinkEvals = 0
+var sAmple = defaultSettings()
+sAmple.maxShrinks = 1000
 check("maxShrinks ample budget behaves like unbounded",
   not forAll("ample-prop", rgB, 1,
     proc(r: var Rng): int = 42,
-    countingProp, decChain, maxShrinks = 1000) and shrinkEvals == 43)
+    countingProp, decChain, settings = sAmple) and shrinkEvals == 43)
 
 # A negative budget is a usage error.
 var bErr = false
 try:
   var rnB = initRng(1)
+  var sNeg = defaultSettings()
+  sNeg.maxShrinks = -1
   discard forAll("neg-budget", rnB, 1,
     proc(r: var Rng): int = 42,
-    countingProp, decChain, maxShrinks = -1)
+    countingProp, decChain, settings = sNeg)
 except AssertionDefect:
   bErr = true
 check("maxShrinks negative raises", bErr)
@@ -1122,7 +1128,10 @@ let gaveUpOut = captureOutput:
     proc(r: var Rng): int = r.genInt(0, 10),
     proc(x: int): bool = true,
     assume = proc(x: int): bool = x == 424242,
-    maxDiscards = 20)
+    settings = (block:
+      var s = defaultSettings()
+      s.maxDiscards = 20
+      s))
 check("unsatisfiable assume fails the run", not gaveUpOk)
 check("unsatisfiable assume prints gave-up line with counts",
   "FAIL [assume-impossible]" in gaveUpOut and
@@ -1136,7 +1145,10 @@ let zeroOut = captureOutput:
     proc(r: var Rng): int = r.genInt(-10, -1),
     proc(x: int): bool = true,
     assume = proc(x: int): bool = x > 0,
-    maxDiscards = 0)
+    settings = (block:
+      var s = defaultSettings()
+      s.maxDiscards = 0
+      s))
 check("maxDiscards = 0 gives up on first discard", not zeroOk)
 check("maxDiscards = 0 prints gave-up line", "gave up" in zeroOut)
 
@@ -1190,7 +1202,10 @@ proc slowRun(fail: bool): tuple[ok: bool, outp: string] =
     ok = forAll("slow-prop", r, 20,
       proc(r: var Rng): int = r.genInt(0, 100),
       proc(x: int): bool = (os.sleep(5); x >= 0),
-      shrinkInt, health = h)
+      shrinkInt, settings = (block:
+        var s = defaultSettings()
+        s.health = h
+        s))
   (ok, o)
 
 let (slowOk, slowOut) = slowRun(false)
@@ -1210,9 +1225,12 @@ let bigOut = captureOutput:
     proc(r: var Rng): string = "x".repeat(5000),
     proc(s: string): bool = s.len == 5000,
     shrinkString,
-    health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 1000,
-                          maxDiscardRatio: 0.0, minExamples: 0,
-                          failOn: {hcDataTooLarge}))
+    settings = (block:
+      var s = defaultSettings()
+      s.health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 1000,
+                              maxDiscardRatio: 0.0, minExamples: 0,
+                              failOn: {hcDataTooLarge})
+      s))
 check("data-too-large fails the run when in failOn", not bigOk)
 check("data-too-large line reports mean bytes",
   "HEALTH" notin bigOut and "FAIL [big-prop]: data-too-large" in bigOut)
@@ -1226,9 +1244,12 @@ let disOut = captureOutput:
     proc(x: int): bool = true,
     shrinkInt,
     assume = proc(x: int): bool = x > 90,
-    health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
-                          maxDiscardRatio: 0.5, minExamples: 0,
-                          failOn: {hcDiscardHeavy}))
+    settings = (block:
+      var s = defaultSettings()
+      s.health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
+                              maxDiscardRatio: 0.5, minExamples: 0,
+                              failOn: {hcDiscardHeavy})
+      s))
 check("discard-heavy fails the run when in failOn", not disOk)
 check("discard-heavy line reports the ratio",
   "FAIL [discardy]: discard-heavy" in disOut)
@@ -1241,8 +1262,11 @@ let fewOut = captureOutput:
     proc(r: var Rng): int = r.genInt(0, 10),
     proc(x: int): bool = x >= 0,
     shrinkInt,
-    health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
-                          maxDiscardRatio: 0.0, minExamples: 10, failOn: {}))
+    settings = (block:
+      var s = defaultSettings()
+      s.health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
+                              maxDiscardRatio: 0.0, minExamples: 10, failOn: {})
+      s))
 check("few-examples warns but the sweep still passes", fewOk)
 check("few-examples line printed",
   "HEALTH [tiny]: few-examples" in fewOut)
@@ -1251,12 +1275,14 @@ check("few-examples line printed",
 # health enabled or fully disabled.
 proc failingHealthRun(seed: uint64, withHealth: bool): string =
   var r = initRng(seed)
+  var s = defaultSettings()
+  if not withHealth: s.health = HealthChecks()
   captureOutput:
     discard forAll("replay-health", r, 100,
       proc(r: var Rng): int = r.genInt(0, 100),
       proc(x: int): bool = x <= 7,
       shrinkInt,
-      health = (if withHealth: defaultHealth() else: HealthChecks()))
+      settings = s)
 check("health on/off: identical failure output",
   failingHealthRun(424242, true) == failingHealthRun(424242, false))
 
@@ -1266,12 +1292,14 @@ check("health on/off: identical failure output",
 proc slowCaseRun(deadline: int): tuple[ok: bool, outp: string] =
   var r = initRng(13)
   var ok = false
+  var s = defaultSettings()
+  s.deadlineMs = deadline
   let o = captureOutput:
     ok = forAll("hangy", r, 50,
       proc(r: var Rng): int = r.genInt(0, 100),
       proc(x: int): bool = (os.sleep(500); x >= 0),
       shrinkInt,
-      deadlineMs = deadline)
+      settings = s)
   (ok, o)
 
 let (deadOk, deadOut) = slowCaseRun(50)
@@ -1292,19 +1320,24 @@ let fastDOut = captureOutput:
     proc(r: var Rng): int = r.genInt(0, 100),
     proc(x: int): bool = x >= 0,
     shrinkInt,
-    deadlineMs = 10_000)
+    settings = (block:
+      var s = defaultSettings()
+      s.deadlineMs = 10_000
+      s))
 check("fast property passes under a generous deadline", fastDOk)
 check("no DEADLINE line when no case is slow", "DEADLINE" notin fastDOut)
 
 # deadlineMs=0 is the default: same seed -> byte-identical failure output.
 proc failingPropDeadlineRun(seed: uint64, deadline: int): string =
   var r = initRng(seed)
+  var s = defaultSettings()
+  s.deadlineMs = deadline
   captureOutput:
     discard forAll("replay-me", r, 100,
       proc(r: var Rng): int = r.genInt(0, 100),
       proc(x: int): bool = x <= 7,
       shrinkInt,
-      deadlineMs = deadline)
+      settings = s)
 check("deadlineMs=0 reproduces current behavior byte-for-byte",
   failingPropDeadlineRun(424242, 0) == outA)
 
@@ -1633,6 +1666,69 @@ let exAssOut = captureOutput:
 check("example failing assume fails the run (not discarded)",
   "failed assume" in exAssOut and "gave up" notin exAssOut and
   "discarded" notin exAssOut)
+
+# --- FalsifySettings profiles (issue #46) ---
+
+# defaultSettings reproduces the old parameter defaults exactly.
+let ds = defaultSettings()
+check("defaultSettings: maxDiscards 500", ds.maxDiscards == 500)
+check("defaultSettings: deadlineMs 0", ds.deadlineMs == 0)
+check("defaultSettings: maxShrinks 0", ds.maxShrinks == 0)
+check("defaultSettings: health is defaultHealth()", ds.health == defaultHealth())
+
+# Default settings give byte-identical sweep streams to the old defaults:
+# same seed, explicit default settings vs omitted settings arg.
+proc failingSettingsRun(seed: uint64, s: FalsifySettings): string =
+  var r = initRng(seed)
+  captureOutput:
+    discard forAll("replay-settings", r, 100,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x <= 7,
+      shrinkInt,
+      settings = s)
+proc failingDefaultRun(seed: uint64): string =
+  var r = initRng(seed)
+  captureOutput:
+    discard forAll("replay-settings", r, 100,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x <= 7,
+      shrinkInt)
+check("settings = defaultSettings() is byte-identical to the old defaults",
+  failingSettingsRun(424242, defaultSettings()) == failingDefaultRun(424242))
+
+# Profile registry: define/with roundtrip; unknown name fails loud.
+defineProfile("test-ci", block:
+  var s = defaultSettings()
+  s.maxDiscards = 20
+  s.deadlineMs = 5_000
+  s)
+check("withProfile returns the registered settings",
+  withProfile("test-ci").maxDiscards == 20 and
+  withProfile("test-ci").deadlineMs == 5_000 and
+  withProfile("test-ci").health == defaultHealth())
+defineProfile("test-local", defaultSettings())
+check("a second profile coexists with the first",
+  withProfile("test-local").maxDiscards == 500 and
+  withProfile("test-ci").maxDiscards == 20)
+var unknownOk = false
+try:
+  discard withProfile("no-such-profile")
+except AssertionDefect:
+  unknownOk = true
+check("unknown profile name fails loud", unknownOk)
+
+# A profile steers an actual sweep: maxDiscards 20 trips the gave-up line.
+var rProf = initRng(7)
+var profOk = true
+let profOut = captureOutput:
+  profOk = forAll("profiled-assume", rProf, 200,
+    proc(r: var Rng): int = r.genInt(0, 10),
+    proc(x: int): bool = true,
+    assume = proc(x: int): bool = x == 424242,
+    settings = withProfile("test-ci"))
+check("profile settings steer the sweep", not profOk)
+check("profile gave-up line names the profile's cap",
+  "gave up: discarded 21 > maxDiscards 20" in profOut)
 
 if failures > 0:
   echo failures, " self-test(s) failed"
