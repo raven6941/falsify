@@ -635,17 +635,19 @@ type CoverReq* = tuple[tag: string, minPct: float]
   ## into a checked claim.
 
 proc reportCoverage(name: string, counts: Table[string, int], total: int,
-                    cover: seq[CoverReq]): bool =
+                    cover: seq[CoverReq], quiet: bool = false): bool =
   ## Print the observed class distribution and check `cover` requirements.
   ## Returns true iff every requirement is met. The table prints first so
-  ## a shortfall verdict always arrives with the evidence.
+  ## a shortfall verdict always arrives with the evidence. `quiet`
+  ## suppresses the distribution table, never the shortfall FAIL lines.
   var rows: seq[(string, int)] = @[]
   for k, v in counts: rows.add((k, v))
   rows.sort(proc(a, b: (string, int)): int = cmp(b[1], a[1]))
-  for (tag, cnt) in rows:
-    let pct = if total > 0: cnt.float * 100.0 / total.float else: 0.0
-    echo "cover [", name, "]: \"", tag, "\": ",
-      formatFloat(pct, ffDecimal, 1), "% (", cnt, "/", total, ")"
+  if not quiet:
+    for (tag, cnt) in rows:
+      let pct = if total > 0: cnt.float * 100.0 / total.float else: 0.0
+      echo "cover [", name, "]: \"", tag, "\": ",
+        formatFloat(pct, ffDecimal, 1), "% (", cnt, "/", total, ")"
   for req in cover:
     let cnt = counts.getOrDefault(req.tag, 0)
     let pct = if total > 0: cnt.float * 100.0 / total.float else: 0.0
@@ -687,6 +689,18 @@ proc defaultHealth*(): HealthChecks =
   result = HealthChecks(maxMeanCaseMs: 50.0, maxMeanInputBytes: 1 shl 20,
                         maxDiscardRatio: 0.5, minExamples: 10, failOn: {})
 
+type Verbosity* = enum
+  vQuiet
+    ## Print only failures (FAIL/DEADLINE lines): no ok lines, no HEALTH
+    ## warnings, no coverage tables. For CI logs that should stay silent
+    ## on green.
+  vNormal
+    ## Today's reporting: ok lines, warnings, tables, failure lines.
+  vVerbose
+    ## Everything in `vNormal`, plus the shrink trajectory (each accepted
+    ## shrink step) and a settings summary in the ok line. Deterministic
+    ## per seed.
+
 type FalsifySettings* = object
   ## The tuning knobs of a `forAll` sweep, bundled so a project can name a
   ## convention once (CI runs deep, local runs fast) instead of repeating
@@ -704,13 +718,15 @@ type FalsifySettings* = object
     ## Shrink-phase candidate budget, 0 = unbounded (default 0).
   health*: HealthChecks
     ## Health-check thresholds (default `defaultHealth()`).
+  verbosity*: Verbosity
+    ## Reporting level (default `vNormal`).
 
 proc defaultSettings*(): FalsifySettings =
   ## The knob values `forAll` used before settings existed: a run with
   ## `settings = defaultSettings()` is byte-identical to the old
   ## parameter defaults.
   FalsifySettings(maxDiscards: 500, deadlineMs: 0, maxShrinks: 0,
-                  health: defaultHealth())
+                  health: defaultHealth(), verbosity: vNormal)
 
 var settingsProfiles = initTable[string, FalsifySettings]()
   ## Named-settings registry backing `defineProfile` / `withProfile`.
@@ -755,10 +771,11 @@ proc trippedChecks*(totalMs: float, totalBytes: int, evaluated, discards: int,
     result.incl(hcFewExamples)
 
 proc reportHealth(name: string, totalMs: float, totalBytes: int,
-                  evaluated, discards: int, h: HealthChecks): bool =
+                  evaluated, discards: int, h: HealthChecks,
+                  quiet: bool = false): bool =
   ## Print a `HEALTH [name]` line per tripped check (or `FAIL` when the
   ## check is in `h.failOn`). Returns true iff no check in `h.failOn`
-  ## tripped.
+  ## tripped. `quiet` suppresses warnings, never `FAIL` lines.
   let tripped = trippedChecks(totalMs, totalBytes, evaluated, discards, h)
   if tripped == {}: return true
   let meanMs = if evaluated > 0: totalMs / evaluated.float else: 0.0
@@ -779,7 +796,8 @@ proc reportHealth(name: string, totalMs: float, totalBytes: int,
         ("few-examples", "only " & $evaluated & " cases evaluated < " &
           $h.minExamples & " minimum")
     let verdict = if c in h.failOn: "FAIL" else: "HEALTH"
-    echo verdict, " [", name, "]: ", label, ": ", detail
+    if verdict == "FAIL" or not quiet:
+      echo verdict, " [", name, "]: ", label, ": ", detail
   return tripped * h.failOn == {}
 
 proc mutateTarget*[T](r: var Rng, best: T,
@@ -833,8 +851,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## start shallow and explore deeper structures in later cases.
   ##
   ## Tuning knobs: `settings` (default `defaultSettings()`) bundles the
-  ## sweep tuning — `maxDiscards`, `deadlineMs`, `maxShrinks`, `health` —
-  ## into one object instead of sixteen parameters at every call site.
+  ## sweep tuning — `maxDiscards`, `deadlineMs`, `maxShrinks`, `health`,
+  ## `verbosity` — into one object instead of sixteen parameters at every
+  ## call site.
   ## The case count `n` stays positional: it is the most-set knob and
   ## reads naturally there. `defineProfile` names a project-wide
   ## convention once (CI runs deep, local runs fast) and `withProfile`
@@ -1010,6 +1029,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         except CatchableError: cf = true
         except Defect: cf = true
         if cf:
+          if settings.verbosity == vVerbose:
+            echo "shrink [", name, "]: ", $c
           result[0] = c
           cands = shrink(result[0])
           progressed = true
@@ -1159,21 +1180,28 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         echo failLine
         return false
     if isReplay:
-      echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
+      if settings.verbosity != vQuiet:
+        echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
     else:
+      let quiet = settings.verbosity == vQuiet
       if classify != nil:
-        if not reportCoverage(name, counts, n, cover): return false
+        if not reportCoverage(name, counts, n, cover, quiet): return false
       if not reportHealth(name, totalMs, totalBytes, evaluated, discards,
-                          settings.health): return false
-      var line = "ok [" & name & "]: " & $n & " cases"
-      if examples.len > 0:
-        line = "ok [" & name & "]: " & $examples.len & " examples, " & $n &
-          " cases"
-      if discards > 0: line &= ", " & $discards & " discarded"
-      if target != nil and haveBest:
-        line &= ", best target score: " &
-          formatFloat(bestScore, ffDecimal, 1)
-      echo line
+                          settings.health, quiet): return false
+      if not quiet:
+        var line = "ok [" & name & "]: " & $n & " cases"
+        if examples.len > 0:
+          line = "ok [" & name & "]: " & $examples.len & " examples, " & $n &
+            " cases"
+        if discards > 0: line &= ", " & $discards & " discarded"
+        if target != nil and haveBest:
+          line &= ", best target score: " &
+            formatFloat(bestScore, ffDecimal, 1)
+        if settings.verbosity == vVerbose:
+          line &= ", settings(maxDiscards=" & $settings.maxDiscards &
+            " deadlineMs=" & $settings.deadlineMs &
+            " maxShrinks=" & $settings.maxShrinks & ")"
+        echo line
   doAssert classify != nil or cover.len == 0,
     "forAll: `cover` requires `classify`"
   doAssert settings.deadlineMs >= 0, "forAll: `settings.deadlineMs` must be non-negative"

@@ -1730,6 +1730,94 @@ check("profile settings steer the sweep", not profOk)
 check("profile gave-up line names the profile's cap",
   "gave up: discarded 21 > maxDiscards 20" in profOut)
 
+# --- verbosity levels (issue #49) ---
+
+check("defaultSettings is vNormal", defaultSettings().verbosity == vNormal)
+
+# vQuiet: a green run prints nothing.
+proc quietGreenRun(): string =
+  var r = initRng(5)
+  var s = defaultSettings()
+  s.verbosity = vQuiet
+  captureOutput:
+    discard forAll("quiet-green", r, 50,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x >= 0,
+      shrinkInt,
+      settings = s)
+check("vQuiet: green run prints nothing", quietGreenRun() == "")
+
+# vQuiet: a failing run still prints the full FAIL line with the seed.
+proc quietFailRun(): string =
+  var r = initRng(424242)
+  var s = defaultSettings()
+  s.verbosity = vQuiet
+  captureOutput:
+    discard forAll("quiet-fail", r, 100,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x <= 7,
+      shrinkInt,
+      settings = s)
+let qfOut = quietFailRun()
+check("vQuiet: failure still prints", qfOut != "")
+check("vQuiet: FAIL line keeps the seed recipe",
+  "FAIL [quiet-fail]" in qfOut and "seed: 424242" in qfOut and
+  "minimal input" in qfOut)
+check("vQuiet: no ok line on failure", "ok [quiet-fail]" notin qfOut)
+
+# vQuiet suppresses HEALTH warnings but not failOn FAILs.
+proc quietHealthRun(): string =
+  var r = initRng(21)
+  var s = defaultSettings()
+  s.verbosity = vQuiet
+  s.health = HealthChecks(maxMeanCaseMs: 1.0, maxMeanInputBytes: 0,
+                          maxDiscardRatio: 0.0, minExamples: 0, failOn: {})
+  captureOutput:
+    discard forAll("quiet-slow", r, 20,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = (os.sleep(5); x >= 0),
+      shrinkInt,
+      settings = s)
+check("vQuiet: HEALTH warnings suppressed", "HEALTH" notin quietHealthRun())
+
+# vVerbose: shrink trajectory printed, deterministic per seed; ok line
+# carries the settings summary.
+proc verboseFailRun(seed: uint64): string =
+  var r = initRng(seed)
+  var s = defaultSettings()
+  s.verbosity = vVerbose
+  captureOutput:
+    discard forAll("verbose-fail", r, 100,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x <= 7,
+      shrinkInt,
+      settings = s)
+let vvA = verboseFailRun(424242)
+let vvB = verboseFailRun(424242)
+check("vVerbose: shrink trajectory printed", "shrink [verbose-fail]" in vvA)
+check("vVerbose: trajectory deterministic per seed", vvA == vvB)
+proc verboseGreenRun(): string =
+  var r = initRng(5)
+  var s = defaultSettings()
+  s.verbosity = vVerbose
+  captureOutput:
+    discard forAll("verbose-green", r, 50,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x >= 0,
+      shrinkInt,
+      settings = s)
+let vgOut = verboseGreenRun()
+check("vVerbose: ok line carries settings summary",
+  "settings(maxDiscards=500 deadlineMs=0 maxShrinks=0)" in vgOut)
+
+# vNormal is byte-identical to the pre-verbosity output: explicit vNormal
+# settings vs omitted settings arg.
+check("vNormal explicit == omitted settings",
+  failingSettingsRun(424242, block:
+    var s = defaultSettings()
+    s.verbosity = vNormal
+    s) == failingDefaultRun(424242))
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
