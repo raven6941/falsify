@@ -1003,6 +1003,114 @@ proc failingPropDeadlineRun(seed: uint64, deadline: int): string =
 check("deadlineMs=0 reproduces current behavior byte-for-byte",
   failingPropDeadlineRun(424242, 0) == outA)
 
+# --- Stateful/model-based testing (#29) ---
+
+type
+  CounterCmd = enum ccInc, ccDec, ccReset
+  CounterModel = object
+    val: int
+  CounterSys = object
+    val: int
+    seenReset: bool
+
+proc newCounterModel(): CounterModel = CounterModel(val: 0)
+proc newCounterSys(): CounterSys = CounterSys(val: 0)
+
+proc runCounter(sys: var CounterSys, m: var CounterModel,
+                c: CounterCmd): bool =
+  ## The system under test has a bug: after any reset, `dec` subtracts 2
+  ## instead of 1 (a stale-flag underflow). The model is the spec.
+  case c
+  of ccInc:
+    inc m.val
+    inc sys.val
+  of ccDec:
+    dec m.val
+    if sys.seenReset: sys.val -= 2
+    else: dec sys.val
+  of ccReset:
+    m.val = 0
+    sys.val = 0
+    sys.seenReset = true
+  sys.val == m.val
+
+proc runCounterFixed(sys: var CounterSys, m: var CounterModel,
+                     c: CounterCmd): bool =
+  ## The same system with the bug fixed: `dec` always subtracts 1.
+  case c
+  of ccInc: inc m.val; inc sys.val
+  of ccDec: dec m.val; dec sys.val
+  of ccReset:
+    m.val = 0
+    sys.val = 0
+    sys.seenReset = true
+  sys.val == m.val
+
+proc genCounterCmd(r: var Rng, m: CounterModel): CounterCmd =
+  ## Precondition-style: only generate `dec` when the model says it's valid.
+  if m.val > 0 and r.genBool(): ccDec
+  else: r.genElements([ccInc, ccReset])
+
+# replayCmds: the primitive the shrinker builds on.
+check("replayCmds: agreeing sequence replays true",
+  replayCmds(@[ccInc, ccInc, ccReset], newCounterModel, newCounterSys,
+    runCounter))
+check("replayCmds: diverging sequence replays false",
+  not replayCmds(@[ccReset, ccDec], newCounterModel, newCounterSys,
+    runCounter))
+check("replayCmds: empty sequence replays true",
+  replayCmds(newSeq[CounterCmd](), newCounterModel, newCounterSys,
+    runCounter))
+
+# shrinkCmdSeq: a padded failing sequence shrinks to the minimal one.
+let padded = @[ccInc, ccInc, ccReset, ccInc, ccInc, ccDec]
+check("shrinkCmdSeq: padded sequence shrinks to [reset, dec]",
+  shrinkCmdSeq(padded, newCounterModel, newCounterSys, runCounter) ==
+    @[ccReset, ccDec])
+
+# shrinkCmdSeq honors per-command shrinkers: int "add" commands where the
+# system adds one extra on odd inputs; 7 must shrink to the minimal odd 1.
+proc newIntAcc(): int = 0
+proc runOdd(sys: var int, m: var int, c: int): bool =
+  m += c
+  if c mod 2 == 1: sys += c + 1
+  else: sys += c
+  sys == m
+proc genIntCmd(r: var Rng, m: int): int = r.genInt(1, 20)
+check("shrinkCmdSeq: command payloads shrink via shrinkCmd",
+  shrinkCmdSeq(@[7], newIntAcc, newIntAcc, runOdd, shrinkInt) == @[1])
+
+# runCommands end-to-end: the buggy counter is caught, with the replay seed
+# and the minimal command sequence in the report.
+proc counterRun(seed: uint64) =
+  var r = initRng(seed)
+  discard runCommands("buggy-counter", r, 200, 8, genCounterCmd,
+    newCounterModel, newCounterSys, runCounter)
+
+let outS1 = captureOutput(counterRun(42))
+let outS2 = captureOutput(counterRun(42))
+check("runCommands: catches the reset/dec bug",
+  "FAIL [buggy-counter]" in outS1)
+check("runCommands: failure output carries the replay seed",
+  "seed: 42" in outS1)
+check("runCommands: failure output shows the minimal command sequence",
+  "minimal commands: @[ccReset, ccDec]" in outS1)
+check("runCommands: same seed replays byte-identical output",
+  outS1 == outS2)
+
+# A correct system passes.
+var rGood = initRng(7)
+check("runCommands: passes a correct system",
+  runCommands("good-counter", rGood, 200, 8, genCounterCmd,
+    newCounterModel, newCounterSys, runCounterFixed))
+
+# regressions: a known-bad seed replays the failure before the sweep.
+var rCmdReg = initRng(999)
+check("runCommands: regression seed replays the failure",
+  not runCommands("counter-regress", rCmdReg, 200, 8, genCounterCmd,
+    newCounterModel, newCounterSys, runCounter,
+    regressions = @[42'u64]))
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)

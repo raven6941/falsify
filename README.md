@@ -379,6 +379,50 @@ algorithm specialized to strings, composing `shrinkChar` per character.
 `forAll` greedily follows the first candidate that still fails, so ordering
 matters more than exhaustiveness.
 
+## Stateful testing
+
+`runCommands` tests stateful systems the QuickCheck/Hypothesis way: generate
+random command sequences, run each against both the real system and a model,
+and fail on divergence.
+
+```nim
+type CounterCmd = enum ccInc, ccDec, ccReset
+var r = initRng(424242)
+let ok = runCommands("counter", r, 200, 10,
+  # genCmd may read the model: precondition-style, only emit commands that
+  # are valid in the current model state.
+  proc(r: var Rng, m: int): CounterCmd =
+    if m > 0 and r.genBool(): ccDec
+    else: r.genElements([ccInc, ccReset]),
+  proc(): int = 0,   # newModel: the expected count
+  proc(): int = 0,   # newSys: the real counter
+  # run applies one command to both and returns false on divergence.
+  proc(sys: var int, m: var int, c: CounterCmd): bool =
+    case c
+    of ccInc: inc m; inc sys
+    of ccDec: dec m; dec sys
+    of ccReset: m = 0; sys = 0
+    sys == m)
+if not ok: quit(1)
+```
+
+Generation and execution are interleaved: each command is generated from the
+current model state, then run immediately against the live system+model pair,
+so the generator always sees the model exactly as the previous commands left
+it. Sequence lengths use the `genSeq`-style length bias, capped at `maxLen`.
+
+On divergence the driver shrinks the command sequence — dropping commands
+(the `shrinkSeq` pattern) and shrinking individual commands via the optional
+`shrinkCmd`, keeping only candidates that still diverge when replayed against
+a fresh model+system — and prints the seed, case index, divergence step, and
+minimal still-diverging sequence. Shrinking replays, never regenerates, and
+never touches the RNG, so the seed discipline holds exactly as in `forAll`:
+the same seed reproduces the identical minimal failing sequence,
+byte-identically. Copy the seed into `regressions` to replay it before the
+random sweep. `replayCmds` (replay one sequence, true iff no divergence) and
+`shrinkCmdSeq` (shrink one known-diverging sequence) are exported for manual
+use.
+
 ## API
 
 - **RNG**: `Rng`, `initRng(seed)`, `next()`, `below(n)`
@@ -395,6 +439,9 @@ matters more than exhaustiveness.
   classify = nil, cover = @[], assume = nil, maxDiscards = 500,
   health = defaultHealth(), deadlineMs = 0)`; coverage requirements are `CoverReq`
   = `tuple[tag: string, minPct: float]`
+- **Stateful**: `runCommands[C, M, Sys](name, r, n, maxLen, genCmd, newModel,
+  newSys, run, shrinkCmd = nil, regressions = @[])`, plus `replayCmds` and
+  `shrinkCmdSeq` for manual sequence replay and shrinking
 
 Zero dependencies beyond the stdlib. Single module.
 

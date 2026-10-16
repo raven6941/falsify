@@ -7,7 +7,8 @@
 ## unmaintained 2017 alpha that doesn't compile on the current toolchain.
 ## This is a small, dependency-free harness: a seeded xorshift64* RNG
 ## (deterministic across platforms), generator combinators, shrinking,
-## and a `forAll` driver with failure reporting.
+## a `forAll` driver with failure reporting, and a `runCommands` driver
+## for stateful/model-based testing.
 ##
 ## Quickstart:
 ##   import falsify
@@ -789,3 +790,154 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     var rr = initRng(seed)
     if not runSweep(rr, isReplay = true): return false
   if not runSweep(r, isReplay = false): return false
+
+proc replayCmds*[C, M, Sys](cmds: seq[C],
+    newModel: proc(): M,
+    newSys: proc(): Sys,
+    run: proc(sys: var Sys, m: var M, c: C): bool): bool =
+  ## Replay a command sequence against a fresh model and system, stepwise.
+  ## Returns true iff every step agrees (no divergence). An exception or
+  ## defect raised by `run` counts as divergence — a crashing step is a
+  ## failing step, the same rule `forAll` applies to properties.
+  var sys = newSys()
+  var m = newModel()
+  for c in cmds:
+    var stepOk = false
+    try:
+      stepOk = run(sys, m, c)
+    except CatchableError:
+      return false
+    except Defect:
+      return false
+    if not stepOk: return false
+  return true
+
+proc shrinkCmdSeq*[C, M, Sys](cmds: seq[C],
+    newModel: proc(): M,
+    newSys: proc(): Sys,
+    run: proc(sys: var Sys, m: var M, c: C): bool,
+    shrinkCmd: proc(c: C): seq[C] = nil): seq[C] =
+  ## Greedy-shrink a diverging command sequence to a minimal still-diverging
+  ## one. Candidates follow the `shrinkSeq` order — empty, halves,
+  ## single-command drops, then per-command shrinks via `shrinkCmd` (skipped
+  ## when nil) — and a candidate is kept only if replaying it against a fresh
+  ## model+system still diverges. The loop stops at a 1-minimal sequence: no
+  ## single drop or command shrink still fails.
+  ##
+  ## Shrinking replays, never regenerates: candidates are checked with
+  ## `replayCmds`, so the generator's preconditions don't restrict the
+  ## shrinker — a dropped command that the generator would never emit in
+  ## that model state is still a legitimate smaller failing sequence.
+  result = cmds
+  let elemShrink: proc(c: C): seq[C] =
+    if shrinkCmd != nil: shrinkCmd
+    else: (proc(c: C): seq[C] = @[])
+  var cands = shrinkSeq(result, elemShrink)
+  while cands.len > 0:
+    var progressed = false
+    for c in cands:
+      if not replayCmds(c, newModel, newSys, run):
+        result = c
+        cands = shrinkSeq(result, elemShrink)
+        progressed = true
+        break
+    if not progressed: break
+
+proc runCommands*[C, M, Sys](name: string, r: var Rng, n: int, maxLen: int,
+    genCmd: proc(r: var Rng, m: M): C,
+    newModel: proc(): M,
+    newSys: proc(): Sys,
+    run: proc(sys: var Sys, m: var M, c: C): bool,
+    shrinkCmd: proc(c: C): seq[C] = nil,
+    regressions: seq[uint64] = @[]): bool =
+  ## Stateful/model-based testing, QuickCheck/Hypothesis style: generate
+  ## random command sequences, run each against both the real system and a
+  ## model, and fail on divergence. Returns true iff all `n` cases agree.
+  ##
+  ## The three types: `C` is the command type, `M` the model type, `Sys`
+  ## the system-under-test type. `genCmd` generates one command and may read
+  ## the model — precondition-style, so it only emits commands that are
+  ## valid in the current model state (e.g. never `pop` an empty model
+  ## stack). `newModel`/`newSys` build fresh instances per case. `run`
+  ## applies one command to *both*: it advances the model per its own
+  ## semantics, drives the real system, and returns false on divergence.
+  ## `shrinkCmd` shrinks individual commands (nil skips command-level
+  ## shrinking; sequence drops always apply).
+  ##
+  ## Generation and execution are interleaved: each command is generated from
+  ## the current model state, then run immediately against the live
+  ## `(sys, m)` pair, so `genCmd` always sees the model exactly as the
+  ## previous commands left it. Sequence lengths use the `genSeq`-style
+  ## length bias (empty and single-command sequences get elevated
+  ## probability), capped at `maxLen`.
+  ##
+  ## On the first divergence the driver aborts that case, shrinks the
+  ## command sequence with `shrinkCmdSeq`, and prints the seed, the case
+  ## index, the divergence step, and the minimal still-diverging command
+  ## sequence, then returns false. Shrinking replays candidates on fresh
+  ## model+system pairs and never touches the RNG.
+  ##
+  ## The seed discipline holds exactly as in `forAll`: the same seed, `n`,
+  ## `maxLen`, and callbacks reproduce the identical command sequences and
+  ## the identical minimal failing sequence, byte-identically. Copy the seed
+  ## from a FAIL line into `regressions` to replay it before the random
+  ## sweep, checked in like any other regression seed.
+  ##
+  ## Exceptions and defects raised by `run` count as divergence (reported
+  ## with the step index, like `forAll`'s property failures). Exceptions
+  ## from `genCmd`, `newModel`, or `newSys` propagate — those are harness
+  ## misuse, fail loud.
+  ##
+  ## Example: a counter whose `dec` misbehaves after a `reset`.
+  ##   type CounterCmd = enum ccInc, ccDec, ccReset
+  ##   var r = initRng(424242)
+  ##   let ok = runCommands("counter", r, 200, 10,
+  ##     proc(r: var Rng, m: int): CounterCmd =
+  ##       if m > 0 and r.genBool(): ccDec
+  ##       else: r.genElements([ccInc, ccReset]),
+  ##     proc(): int = 0,                       # model: expected count
+  ##     proc(): int = 0,                       # system: real counter
+  ##     proc(sys: var int, m: var int, c: CounterCmd): bool =
+  ##       case c
+  ##       of ccInc: inc m; inc sys
+  ##       of ccDec: dec m; dec sys
+  ##       of ccReset: m = 0; sys = 0
+  ##       sys == m)
+  ##   if not ok: quit(1)
+  proc runCase(rr: var Rng, isReplay: bool): bool =
+    result = true
+    for i in 0 ..< n:
+      rr.size = min(100, i * 100 div max(n, 1))
+      var sys = newSys()
+      var m = newModel()
+      let len = biasedLen(rr, maxLen)
+      var cmds: seq[C] = @[]
+      var failedAt = -1
+      for k in 0 ..< len:
+        let c = genCmd(rr, m)
+        cmds.add(c)
+        var stepOk = false
+        try:
+          stepOk = run(sys, m, c)
+        except CatchableError as e:
+          echo "FAIL [", name, "]: exception in run at step ", k, ": ", e.msg
+        except Defect as d:
+          echo "FAIL [", name, "]: defect in run at step ", k, ": ",
+            d.name, ": ", d.msg
+        if not stepOk:
+          failedAt = k
+          break
+      if failedAt >= 0:
+        let minimal = shrinkCmdSeq(cmds, newModel, newSys, run, shrinkCmd)
+        echo "FAIL [", name, "]: seed: ", rr.seed, ", case ", i,
+          ", diverged at step ", failedAt, ", minimal commands: ", $minimal
+        return false
+    if isReplay:
+      echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
+    else:
+      echo "ok [", name, "]: ", n, " cases"
+  result = true
+  for seed in regressions:
+    var rr = initRng(seed)
+    if not runCase(rr, isReplay = true): return false
+  if not runCase(r, isReplay = false): return false
