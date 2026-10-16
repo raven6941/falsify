@@ -363,6 +363,55 @@ classification it never perturbs the stream: timing and measuring are
 read-only on the RNG, so the same seed gives the identical cases with or
 without `health`. Set any threshold to 0 to disable that check.
 
+## Targeted generation
+
+Blind generation finds a failure that lives past a narrow threshold only
+by luck: every case is an independent draw. Pass `target` — a pure
+function of the generated input reporting a float score, higher is better
+— and `forAll` steers the search toward higher scores, Hypothesis
+`target()` style:
+
+```nim
+var r = initRng(424242)
+let ok = forAll("near-overflow", r, 200,
+  proc(r: var Rng): int = r.genInt(0, 1_000_000),
+  proc(x: int): bool = x * x >= 0,   # the property under test
+  shrinkInt,
+  target = proc(x: int): float = x.float)  # steer toward large x
+```
+
+`forAll` keeps the best-scoring input seen; with probability 1/4 the next
+case is a small mutation of the best input instead of a fresh draw (fresh
+draws still happen, so coverage never collapses to a point). Mutations
+reuse the shrinker as the mutator — the least-aggressive shrink candidates
+are small perturbations — so targeting needs `shrink` to steer at all:
+with no shrinker, scores are still recorded and reported, but every case
+is a fresh draw. Scores steer generation only, never the shrink phase: a
+failing case still shrinks to the minimal failing input exactly as in a
+blind run. The best score is reported in the ok line:
+
+```
+ok [near-overflow]: 200 cases, best target score: 999998.0
+```
+
+Unlike Hypothesis's `target()`, which the test body calls mid-execution,
+falsify's score is a pure function of the generated input — a capturing
+lambda cannot reach it through falsify's proc-typed callbacks, so the
+score you can report is whatever you can compute from `x`. In practice
+this covers the motivating uses: push a computed magnitude toward a
+threshold, grow a structure toward a size. The score function never touches
+the RNG (the read-only discipline of `classify` and health): the same seed
+gives the identical score stream and the identical best-input trajectory,
+and with `target` unset the case stream is byte-identical to a blind run.
+NaN scores never become the best. Targeting applies to the random sweep
+only, not to regression replays.
+
+One directionality to know: shrinkers-as-mutators only perturb toward the
+shrink fixed point (toward 0 for ints, toward shorter for seqs), so
+targeting climbs scores that are monotone in the shrink direction. A score
+rewarding the opposite direction gets fresh draws only — no worse than
+blind, but no steering either.
+
 ## Writing a shrinker
 
 A shrinker is `proc(x: T): seq[T]` returning candidates ordered

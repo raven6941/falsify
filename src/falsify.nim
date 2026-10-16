@@ -564,6 +564,19 @@ proc reportHealth(name: string, totalMs: float, totalBytes: int,
     echo verdict, " [", name, "]: ", label, ": ", detail
   return tripped * h.failOn == {}
 
+proc mutateTarget*[T](r: var Rng, best: T,
+                     shrink: proc(x: T): seq[T]): tuple[ok: bool, val: T] =
+  ## One targeted-generation mutation step: pick uniformly among the first
+  ## few least-aggressive shrink candidates of the best-scoring input seen
+  ## so far. Shrink lists are most-aggressive first, so the reversed head
+  ## is small perturbations, not jumps back to the shrink fixed point.
+  ## Returns `ok = false` when the shrinker yields no candidates (e.g. the
+  ## best input is already minimal) — the caller then draws fresh instead.
+  let cands = shrink(best)
+  if cands.len == 0: return (false, best)
+  let k = min(4, cands.len)
+  (true, cands[cands.len - 1 - r.below(k)])
+
 proc forAll*[T](name: string, r: var Rng, n: int,
                 gen: proc(r: var Rng): T,
                 prop: proc(x: T): bool,
@@ -574,7 +587,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 assume: proc(x: T): bool = nil,
                 maxDiscards: int = 500,
                 health: HealthChecks = defaultHealth(),
-                deadlineMs: int = 0): bool =
+                deadlineMs: int = 0,
+                target: proc(x: T): float = nil): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
   ## case, then return false. Returns true iff all cases pass.
@@ -623,6 +637,38 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## the slow property once per candidate, which is exactly the hang the
   ## deadline aborts. The DEADLINE line therefore reports the raw
   ## (unshrunk) case via the seed, not a minimal input.
+  ##
+  ## Targeted generation: `target` (default nil = off, Hypothesis
+  ## `target()` style) is a pure function of the generated input reporting
+  ## a float score per evaluated case — higher is better. `forAll` keeps
+  ## the best-scoring input seen; with probability 1/4 the next case is a
+  ## small mutation of the best input instead of a fresh draw (fresh draws
+  ## still happen, so coverage never collapses to a point). Mutations reuse
+  ## the shrinker as the mutator — the least-aggressive shrink candidates
+  ## are small perturbations — so targeting needs `shrink` to steer at all:
+  ## with no shrinker, scores are still recorded and reported, but every
+  ## case is a fresh draw. Scores steer generation only, never the shrink
+  ## phase: a failing case still shrinks to the minimal failing input
+  ## exactly as in a blind run. The best score is reported in the ok line
+  ## when targeting is on. Targeting applies to the random sweep only, not
+  ## to regression replays (replays are fixed failing cases, like
+  ## `classify` and health).
+  ##
+  ## Unlike Hypothesis's `target()`, which the test body calls
+  ## mid-execution, falsify's score is a pure function of the generated
+  ## input — a capturing lambda cannot reach it through falsify's
+  ## proc-typed callbacks, so the score you can report is whatever you can
+  ## compute from `x`. In practice this covers the motivating uses (push a
+  ## computed magnitude toward a threshold, grow a structure toward a
+  ## size): compute the magnitude from the input and score it.
+  ##
+  ## The score function never touches the RNG (the same read-only
+  ## discipline as `classify` and health): same seed gives the identical
+  ## score stream and the identical best-input trajectory, so the seed
+  ## discipline holds. With `target` unset the case stream is byte-identical
+  ## to today — targeting changes the stream by construction (mutation
+  ## replaces some draws), but deterministically per seed. NaN scores never
+  ## become the best.
   ##
   ## Coverage: `classify` bins each generated case into named classes and
   ## `forAll` prints the observed distribution after the sweep, QuickCheck
@@ -694,9 +740,18 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     var evaluated = 0
     var totalMs = 0.0
     var totalBytes = 0
+    var haveBest = false
+    var best: T
+    var bestScore = 0.0
+    let targeting = not isReplay and target != nil and shrink != nil
     for i in 0 ..< n:
       rr.size = min(100, i * 100 div max(n, 1))
-      let x = gen(rr)
+      let x =
+        if targeting and haveBest and rr.below(4) == 0:
+          let (ok, m) = mutateTarget(rr, best, shrink)
+          if ok: m else: gen(rr)
+        else:
+          gen(rr)
       if not isReplay:
         totalBytes += approxSize(x)
       if assume != nil:
@@ -716,6 +771,14 @@ proc forAll*[T](name: string, r: var Rng, n: int,
               " > maxDiscards ", maxDiscards, " cases"
             return false
           continue
+      if not isReplay and target != nil:
+        # Scoring is read-only on the RNG (like classify): it sees only
+        # the generated value, so scoring never perturbs the stream.
+        let s = target(x)
+        if s == s and (not haveBest or s > bestScore):  # NaN never wins
+          haveBest = true
+          bestScore = s
+          best = x
       if not isReplay and classify != nil:
         var tags: seq[string] = @[]
         try:
@@ -778,10 +841,12 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         if not reportCoverage(name, counts, n, cover): return false
       if not reportHealth(name, totalMs, totalBytes, evaluated, discards,
                           health): return false
-      if discards > 0:
-        echo "ok [", name, "]: ", n, " cases, ", discards, " discarded"
-      else:
-        echo "ok [", name, "]: ", n, " cases"
+      var line = "ok [" & name & "]: " & $n & " cases"
+      if discards > 0: line &= ", " & $discards & " discarded"
+      if target != nil and haveBest:
+        line &= ", best target score: " &
+          formatFloat(bestScore, ffDecimal, 1)
+      echo line
   doAssert classify != nil or cover.len == 0,
     "forAll: `cover` requires `classify`"
   doAssert deadlineMs >= 0, "forAll: `deadlineMs` must be non-negative"
