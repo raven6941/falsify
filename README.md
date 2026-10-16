@@ -100,6 +100,32 @@ constraint into generation (e.g. `2 * r.genInt(0, 49)` for evens) — over
 heavy filtering. Filtering a wide generator is the retry-hunt equivalent of
 an unseeded stream: it works until it silently doesn't.
 
+## Composing generators
+
+Generators compose like QuickCheck's `Gen`: `genMap` is `fmap`, `genBind`
+is `>>=`.
+
+```nim
+let even = r.genMap(proc(r: var Rng): int = r.genInt(0, 49),
+                    proc(x: int): int = 2 * x)
+
+let payload = r.genBind(proc(r: var Rng): int = r.genInt(1, 8),
+                        proc(r: var Rng, n: int): seq[bool] =
+                          r.genSeq(n, genBool))
+```
+
+`genMap(r, gen, f)` draws once from `gen` and applies `f` — the draws are
+exactly `gen`'s draws, so mapping never perturbs the stream. `genBind(r,
+gen, k)` draws `x` from `gen` and then runs the continuation generator
+`k(x)`: the size-then-payload pattern above draws a length, then a payload
+of exactly that length.
+
+The threading is the point: instead of *capturing* a local in a lambda
+(which infers `{.closure.}` and won't match a plain `proc` parameter —
+the same rule as every other `proc` parameter in this library), you
+*generate* the value and thread it as an argument. `f` and `k` must not
+capture locals; named top-level procs and non-capturing lambdas work.
+
 ## Sized and recursive generation
 
 Recursive data (trees, ASTs, terms) needs a generator that terminates and
@@ -248,6 +274,7 @@ matters more than exhaustiveness.
   `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
   `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`,
   `genSuchThat[T](gen, pred, maxRetries = 100)`,
+  `genMap[T, U](r, gen, f)`, `genBind[T, U](r, gen, k)`,
   `genPair[T, U]`, `genTriple[T, U, V]`,
   `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
 - **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
