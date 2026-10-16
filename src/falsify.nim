@@ -241,6 +241,39 @@ proc genElements*[T](r: var Rng, xs: openArray[T]): T =
   doAssert xs.len > 0, "genElements: empty xs"
   xs[r.below(xs.len)]
 
+proc genSubseq*[T](r: var Rng, xs: openArray[T]): seq[T] =
+  ## Binomial subsequence: each element of `xs` is kept with probability
+  ## 1/2 (QuickCheck `sublistOf`); order is preserved and `xs` is untouched.
+  ##
+  ## The sibling that *reorders* is `genShuffle` (#34); the sibling that
+  ## samples *distinct indices* without order guarantees is `genUniqueInts`.
+  ## The draws are exactly one Bernoulli per element, so the seed
+  ## discipline is unchanged: same seed, same subsequence.
+  result = newSeq[T](0)
+  for x in xs:
+    if r.genBool(): result.add(x)
+
+proc genUniqueInts*(r: var Rng, lo, hi, n: int): seq[int] =
+  ## `n` distinct ints from `lo..hi` via partial Fisher-Yates over the
+  ## index range — no duplicates by construction (Hypothesis
+  ## `st.sets(st.integers(lo, hi), min_size=n, max_size=n)` without the
+  ## rejection sampling: this draws exactly `n` times).
+  ##
+  ## `n > hi - lo + 1` and negative `n` are usage errors (a filter can't
+  ## conjure distinct values out of a range that's too small); `n == 0`
+  ## returns empty without drawing.
+  let size = hi - lo + 1
+  doAssert lo <= hi, "genUniqueInts: lo > hi"
+  doAssert n >= 0, "genUniqueInts: negative n"
+  doAssert n <= size, "genUniqueInts: n exceeds range size"
+  var idx = newSeq[int](size)
+  for i in 0 ..< size: idx[i] = i
+  for i in 0 ..< n:
+    let j = i + r.below(size - i)
+    swap(idx[i], idx[j])
+  result = newSeq[int](n)
+  for i in 0 ..< n: result[i] = lo + idx[i]
+
 proc genSuchThat*[T](r: var Rng, gen: proc(r: var Rng): T,
                      pred: proc(x: T): bool, maxRetries = 100): T =
   ## Draw from `gen` until `pred` holds; raise `ValueError` after

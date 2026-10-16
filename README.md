@@ -92,6 +92,32 @@ Empty inputs are usage errors: `genOneOf([])` / `genFrequency([])` fail at
 compile time; `genElements([])` and non-positive weights fail at run time
 (`doAssert`).
 
+## Sampling collections: genSubseq, genUniqueInts (and genShuffle)
+
+Three generators cover sampling from collections; they partition the space,
+so pick by what the property needs:
+
+- `genSubseq(xs)` — binomial subsequence (QuickCheck `sublistOf`): each
+  element kept with probability 1/2, order preserved. For subset properties
+  and orderings:
+
+  ```nim
+  let keep = r.genSubseq(@[1, 2, 3, 4, 5])
+  check keep == keep.sorted   # a subsequence of a sorted seq is sorted
+  ```
+
+- `genUniqueInts(lo, hi, n)` — `n` *distinct* ints from `lo..hi`, drawn via
+  partial Fisher-Yates (no rejection sampling — exactly `n` draws).
+  `n` larger than the range, `lo > hi`, or negative `n` are usage errors
+  (`doAssert`); `n = 0` returns empty without drawing:
+
+  ```nim
+  let hand = r.genUniqueInts(0, 51, 5)  # a 5-card hand, no duplicates
+  ```
+
+- `genShuffle(xs)` — Fisher-Yates permutation (#34, in progress); for reordering
+  properties like `sorted(shuffled) == sorted(original)`.
+
 ## Constrained generation
 
 `genSuchThat(gen, pred)` draws from `gen` until `pred` holds — even numbers,

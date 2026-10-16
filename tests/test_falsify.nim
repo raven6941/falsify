@@ -226,6 +226,90 @@ for _ in 0 ..< 200:
 check("genElements only picks from xs", eOnly)
 check("genElements covers all", eSeen[0] and eSeen[1] and eSeen[2] and eSeen[3])
 
+# genSubseq: subsequence of xs — order preserved, elements from xs only.
+var rss = initRng(99)
+let orig = @[10, 20, 30, 40, 50, 60, 70, 80]
+var subOk = true
+if rss.genSubseq(newSeq[int]()).len != 0: subOk = false
+var lens = newSeq[int](0)
+for _ in 0 ..< 300:
+  let s = rss.genSubseq(orig)
+  var last = -1
+  for x in s:
+    var pos = -1
+    for i, v in orig:
+      if v == x and i > last: pos = i; break
+    if pos < 0: subOk = false
+    last = pos
+  lens.add(s.len)
+check("genSubseq is a subsequence; empty in -> empty out", subOk)
+
+# genSubseq deterministic per seed; lengths distribute binomially (n=8).
+var rs1 = initRng(424242)
+var rs2 = initRng(424242)
+var subDet = true
+for _ in 0 ..< 50:
+  if rs1.genSubseq(orig) != rs2.genSubseq(orig): subDet = false
+check("genSubseq deterministic per seed", subDet)
+var meanLen = 0.0
+for l in lens: meanLen += l.float
+meanLen /= lens.len.float
+check("genSubseq mean length near n/2", meanLen > 2.5 and meanLen < 5.5)
+
+# genSubseq draws nothing for empty input (stream position unchanged).
+var rs3 = initRng(5)
+discard rs3.genSubseq(newSeq[int]())
+var rs4 = initRng(5)
+check("genSubseq empty input draws nothing", rs3.genInt(0, 100) == rs4.genInt(0, 100))
+
+# genUniqueInts: n distinct ints in lo..hi, covering the range over time.
+var ru = initRng(4242)
+var uniqOk = true
+var seenU = [false, false, false, false, false, false, false, false, false, false]
+for _ in 0 ..< 100:
+  let u = ru.genUniqueInts(0, 9, 4)
+  if u.len != 4: uniqOk = false
+  var local = [false, false, false, false, false, false, false, false, false, false]
+  for x in u:
+    if x < 0 or x > 9: uniqOk = false
+    if local[x]: uniqOk = false
+    local[x] = true
+    seenU[x] = true
+check("genUniqueInts distinct and in range", uniqOk)
+var fullSeen = true
+for b in seenU: fullSeen = fullSeen and b
+check("genUniqueInts covers the range", fullSeen)
+
+# n == size returns a permutation; deterministic per seed.
+var rf1 = initRng(11)
+var rf2 = initRng(11)
+let p1 = rf1.genUniqueInts(-5, 5, 11)
+let p2 = rf2.genUniqueInts(-5, 5, 11)
+var permOk = p1.len == 11
+var pSeen = [false, false, false, false, false, false, false, false, false, false, false]
+for x in p1:
+  if x < -5 or x > 5 or pSeen[x + 5]: permOk = false
+  pSeen[x + 5] = true
+check("genUniqueInts full range is a permutation", permOk)
+check("genUniqueInts deterministic per seed", p1 == p2)
+
+# n == 0 returns empty without drawing (stream position unchanged).
+var rz2 = initRng(7)
+let z0 = rz2.genUniqueInts(0, 9, 0)
+var rz3 = initRng(7)
+check("genUniqueInts n=0 empty, no draws",
+  z0.len == 0 and rz2.genInt(0, 9) == rz3.genInt(0, 9))
+
+# Usage errors raise: n too large, lo > hi, negative n.
+var uErrs = 0
+for t in [(0, 9, 11), (5, 3, 0), (0, 9, -1)]:
+  try:
+    var rr = initRng(1)
+    discard rr.genUniqueInts(t[0], t[1], t[2])
+  except AssertionDefect:
+    inc uErrs
+check("genUniqueInts usage errors raise", uErrs == 3)
+
 # Empty inputs are usage errors: compile-time for the macros (literal `[]`),
 # runtime for genElements.
 static:
