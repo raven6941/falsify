@@ -648,6 +648,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 maxDiscards: int = 500,
                 health: HealthChecks = defaultHealth(),
                 deadlineMs: int = 0,
+                maxShrinks: int = 0,
                 target: proc(x: T): float = nil): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
@@ -697,6 +698,20 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## the slow property once per candidate, which is exactly the hang the
   ## deadline aborts. The DEADLINE line therefore reports the raw
   ## (unshrunk) case via the seed, not a minimal input.
+  ##
+  ## Shrink budget: `maxShrinks` (default 0 = unbounded, today's behavior)
+  ## caps the number of shrink candidates evaluated after a failure.
+  ## `deadlineMs` bounds the per-case *check*; the budget bounds the
+  ## *shrink phase* — a pathological shrinker emitting enormous candidate
+  ## lists (deep or cyclic structures) can't spin the loop for minutes
+  ## while the user waits for the counterexample shrinking already found.
+  ## Budget accounting is one counter, deterministic per seed. When the
+  ## budget exhausts, `forAll` stops with the best counterexample found so
+  ## far and says so: the FAIL line reads "... (shrink budget N
+  ## exhausted, may not be minimal)"; a shrink that finishes inside the
+  ## budget reads "... (shrunk to minimum, budget N)". With the default 0
+  ## the line is byte-identical to today, so existing suites see no
+  ## change in shrink quality or report text.
   ##
   ## Targeted generation: `target` (default nil = off, Hypothesis
   ## `target()` style) is a pure function of the generated input reporting
@@ -876,11 +891,17 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       if failed:
         result = false
         var minimal = x
+        var shrinksUsed = 0
+        var budgetExhausted = false
         if shrink != nil:
           var cands = shrink(minimal)
           while cands.len > 0:
             var progressed = false
             for c in cands:
+              if maxShrinks > 0 and shrinksUsed >= maxShrinks:
+                budgetExhausted = true
+                break
+              inc shrinksUsed
               var cf = false
               try: cf = not prop(c)
               except CatchableError: cf = true
@@ -890,9 +911,16 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 cands = shrink(minimal)
                 progressed = true
                 break
-            if not progressed: break
-        echo "FAIL [", name, "]: seed: ", rr.seed, ", case ", i,
-          ", minimal input: ", $minimal
+            if budgetExhausted or not progressed: break
+        var failLine = "FAIL [" & name & "]: seed: " & $rr.seed & ", case " & $i &
+          ", minimal input: " & $minimal
+        if maxShrinks > 0:
+          if budgetExhausted:
+            failLine &= " (shrink budget " & $maxShrinks &
+              " exhausted, may not be minimal)"
+          else:
+            failLine &= " (shrunk to minimum, budget " & $maxShrinks & ")"
+        echo failLine
         return false
     if isReplay:
       echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
@@ -910,6 +938,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   doAssert classify != nil or cover.len == 0,
     "forAll: `cover` requires `classify`"
   doAssert deadlineMs >= 0, "forAll: `deadlineMs` must be non-negative"
+  doAssert maxShrinks >= 0, "forAll: `maxShrinks` must be non-negative"
   result = true
   for seed in regressions:
     var rr = initRng(seed)

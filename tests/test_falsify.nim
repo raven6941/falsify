@@ -57,6 +57,54 @@ check("forAll falsifies broken property",
     proc(x: int): bool = x <= 7,
     shrinkInt))
 
+# maxShrinks: a shrinker emitting a long always-failing chain is
+# interrupted at the budget; unbounded (default) shrinks to the true minimum.
+proc decChain(x: int): seq[int] =
+  var c: seq[int] = @[]
+  for v in countdown(x - 1, 0): c.add(v)
+  c
+
+var shrinkEvals = 0
+proc countingProp(x: int): bool =
+  inc shrinkEvals
+  x < 0
+
+# Budget 10 on input 42: 1 sweep eval + exactly 10 shrink candidates.
+var rbB = initRng(1)
+shrinkEvals = 0
+check("maxShrinks interrupts deep shrink",
+  not forAll("budget-prop", rbB, 1,
+    proc(r: var Rng): int = 42,
+    countingProp, decChain, maxShrinks = 10) and shrinkEvals == 11)
+
+# Default (0 = unbounded) terminates naturally with the true minimum 0:
+# 1 sweep + 42 one-candidate greedy steps.
+var ru2 = initRng(1)
+shrinkEvals = 0
+check("maxShrinks default still shrinks to minimum",
+  not forAll("default-prop", ru2, 1,
+    proc(r: var Rng): int = 42,
+    countingProp, decChain) and shrinkEvals == 43)
+
+# An ample budget changes nothing vs unbounded.
+var rgB = initRng(1)
+shrinkEvals = 0
+check("maxShrinks ample budget behaves like unbounded",
+  not forAll("ample-prop", rgB, 1,
+    proc(r: var Rng): int = 42,
+    countingProp, decChain, maxShrinks = 1000) and shrinkEvals == 43)
+
+# A negative budget is a usage error.
+var bErr = false
+try:
+  var rnB = initRng(1)
+  discard forAll("neg-budget", rnB, 1,
+    proc(r: var Rng): int = 42,
+    countingProp, decChain, maxShrinks = -1)
+except AssertionDefect:
+  bErr = true
+check("maxShrinks negative raises", bErr)
+
 # shrinkInt minimality: the greedy shrink loop must reach the true boundary.
 proc shrinkLoop(x: int, fails: proc(c: int): bool): int =
   var m = x

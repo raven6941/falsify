@@ -315,6 +315,29 @@ slow property once per candidate, which is the hang the deadline just
 avoided. `deadlineMs = 0` (the default) disables it and reproduces
 current behavior exactly — same seed, byte-identical output.
 
+## Shrink budget
+
+`deadlineMs` bounds the per-case *check*; `maxShrinks` bounds the *shrink
+phase* — a pathological shrinker emitting enormous candidate lists (deep
+or cyclic structures) can't spin the loop for minutes while you wait for
+the counterexample shrinking already found:
+
+```nim
+let ok = forAll("tree-prop", r, 200, gen, prop, shrinkTree, maxShrinks = 10_000)
+```
+
+When the budget exhausts, `forAll` stops with the best counterexample
+found so far and says so:
+
+```
+FAIL [tree-prop]: seed: 424242, case 0, minimal input: ... (shrink budget 10000 exhausted, may not be minimal)
+```
+
+A shrink that finishes inside the budget reads `... (shrunk to minimum,
+budget 10000)`. Budget accounting is one counter and deterministic per
+seed. `maxShrinks = 0` (the default) is unbounded — today's behavior,
+byte-identical report lines, no change in shrink quality.
+
 ## Coverage
 
 A green run says "200 cases passed" — but what *were* those cases? Pass an
@@ -517,13 +540,14 @@ use.
   `genSuchThat[T](gen, pred, maxRetries = 100)`,
   `genMap[T, U](r, gen, f)`, `genBind[T, U](r, gen, k)`,
   `genPair[T, U]`, `genTriple[T, U, V]`,
-  `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`
+  `genSized[T](r, f)`, `genRecursive[T](r, leaf, branch)`,
+  `genSubseq[T](xs)`, `genUniqueInts(lo, hi, n)`
 - **Shrinkers**: `shrinkInt`, `shrinkFloat`, `shrinkChar`, `shrinkString`,
   `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
   classify = nil, cover = @[], assume = nil, maxDiscards = 500,
-  health = defaultHealth(), deadlineMs = 0)`; coverage requirements are `CoverReq`
-  = `tuple[tag: string, minPct: float]`
+  health = defaultHealth(), deadlineMs = 0, maxShrinks = 0)`; coverage
+  requirements are `CoverReq` = `tuple[tag: string, minPct: float]`
 - **Stateful**: `runCommands[C, M, Sys](name, r, n, maxLen, genCmd, newModel,
   newSys, run, shrinkCmd = nil, regressions = @[])`, plus `replayCmds` and
   `shrinkCmdSeq` for manual sequence replay and shrinking
