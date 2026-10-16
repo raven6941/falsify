@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.3.0"
+version       = "0.1.0"
 author        = "Wally"
 description   = "Property-based testing for Nim: falsify your properties"
 license       = "MIT"
