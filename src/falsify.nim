@@ -27,6 +27,8 @@ import std/macros
 import std/tables
 import std/algorithm
 import std/strutils
+import std/monotimes
+import std/times
 
 
 type
@@ -476,6 +478,91 @@ proc reportCoverage(name: string, counts: Table[string, int], total: int,
       return false
   return true
 
+type HealthCheck* = enum
+  hcTooSlow
+    ## Mean per-case property time above `maxMeanCaseMs`.
+  hcDataTooLarge
+    ## Mean generated input size above `maxMeanInputBytes`.
+  hcDiscardHeavy
+    ## Discard ratio above `maxDiscardRatio` — the soft warning ahead of
+    ## #22's hard `maxDiscards` abort.
+  hcFewExamples
+    ## Fewer than `minExamples` cases actually evaluated.
+
+type HealthChecks* = object
+  maxMeanCaseMs*: float
+    ## Warn when the mean per-case property time (generation excluded)
+    ## exceeds this many milliseconds. 0 disables the check.
+  maxMeanInputBytes*: int
+    ## Warn when the mean generated input size (see `approxSize`) exceeds
+    ## this many bytes. 0 disables the check.
+  maxDiscardRatio*: float
+    ## Warn when discards per evaluated case exceed this ratio. 0 disables.
+  minExamples*: int
+    ## Warn when fewer than this many cases were evaluated. 0 disables.
+  failOn*: set[HealthCheck]
+    ## Tripped checks that fail the run instead of just warning. Empty by
+    ## default: a green run stays green, with `HEALTH` lines in the report.
+
+proc defaultHealth*(): HealthChecks =
+  ## Zero-configuration health: sane thresholds, warnings only.
+  result = HealthChecks(maxMeanCaseMs: 50.0, maxMeanInputBytes: 1 shl 20,
+                        maxDiscardRatio: 0.5, minExamples: 10, failOn: {})
+
+proc approxSize*[T](x: T): int =
+  ## Order-of-magnitude byte size of `x`: the value itself plus, for
+  ## anything with `len`, one level of element payload. Not exact — a
+  ## 1MB-vs-10B distinction is what `hcDataTooLarge` needs.
+  when compiles(x.len) and compiles(x[0]):
+    result = sizeof(x) + x.len * sizeof(x[0])
+  elif compiles(x.len):
+    result = sizeof(x) + x.len
+  else:
+    result = sizeof(x)
+
+proc trippedChecks*(totalMs: float, totalBytes: int, evaluated, discards: int,
+                    h: HealthChecks): set[HealthCheck] =
+  ## Pure tripping logic for the health checks, exported so tests can check
+  ## it directly without running a sweep.
+  result = {}
+  if evaluated > 0:
+    if h.maxMeanCaseMs > 0 and totalMs / evaluated.float > h.maxMeanCaseMs:
+      result.incl(hcTooSlow)
+    if h.maxMeanInputBytes > 0 and totalBytes div evaluated > h.maxMeanInputBytes:
+      result.incl(hcDataTooLarge)
+    if h.maxDiscardRatio > 0 and discards.float / evaluated.float > h.maxDiscardRatio:
+      result.incl(hcDiscardHeavy)
+  if h.minExamples > 0 and evaluated < h.minExamples:
+    result.incl(hcFewExamples)
+
+proc reportHealth(name: string, totalMs: float, totalBytes: int,
+                  evaluated, discards: int, h: HealthChecks): bool =
+  ## Print a `HEALTH [name]` line per tripped check (or `FAIL` when the
+  ## check is in `h.failOn`). Returns true iff no check in `h.failOn`
+  ## tripped.
+  let tripped = trippedChecks(totalMs, totalBytes, evaluated, discards, h)
+  if tripped == {}: return true
+  let meanMs = if evaluated > 0: totalMs / evaluated.float else: 0.0
+  let meanBytes = if evaluated > 0: totalBytes div evaluated else: 0
+  for c in tripped:
+    let (label, detail) = case c
+      of hcTooSlow:
+        ("too-slow", "mean case time " & formatFloat(meanMs, ffDecimal, 1) &
+          "ms > " & formatFloat(h.maxMeanCaseMs, ffDecimal, 1) & "ms")
+      of hcDataTooLarge:
+        ("data-too-large", "mean input " & $meanBytes & " bytes > " &
+          $h.maxMeanInputBytes & " bytes")
+      of hcDiscardHeavy:
+        ("discard-heavy", "discards " & $discards & "/" & $evaluated & " = " &
+          formatFloat(100.0 * discards.float / evaluated.float, ffDecimal, 1) &
+          "% > " & formatFloat(100.0 * h.maxDiscardRatio, ffDecimal, 1) & "%")
+      of hcFewExamples:
+        ("few-examples", "only " & $evaluated & " cases evaluated < " &
+          $h.minExamples & " minimum")
+    let verdict = if c in h.failOn: "FAIL" else: "HEALTH"
+    echo verdict, " [", name, "]: ", label, ": ", detail
+  return tripped * h.failOn == {}
+
 proc forAll*[T](name: string, r: var Rng, n: int,
                 gen: proc(r: var Rng): T,
                 prop: proc(x: T): bool,
@@ -484,7 +571,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 classify: proc(x: T): seq[string] = nil,
                 cover: seq[CoverReq] = @[],
                 assume: proc(x: T): bool = nil,
-                maxDiscards: int = 500): bool =
+                maxDiscards: int = 500,
+                health: HealthChecks = defaultHealth()): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
   ## case, then return false. Returns true iff all cases pass.
@@ -549,6 +637,21 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## `genSuchThat`: a precondition that discards most cases is usually a
   ## generator that should have produced satisfying cases directly.
   ##
+  ## Health checks: `health` (default `defaultHealth()`) watches the sweep
+  ## for degenerate shapes a green run would otherwise hide — Hypothesis
+  ## `HealthCheck` style. `hcTooSlow` (mean per-case property time, in ms,
+  ## generation excluded), `hcDataTooLarge` (mean `approxSize` of the
+  ## generated input, in bytes), `hcDiscardHeavy` (discards per evaluated
+  ## case — the soft warning before `maxDiscards`' hard abort), and
+  ## `hcFewExamples` (fewer than `minExamples` cases evaluated). Tripped
+  ## checks print `HEALTH [name]` lines and warn by default; listing a
+  ## check in `failOn` makes it fail the run instead. Health covers the
+  ## random sweep only, like classification — and like classification it
+  ## never perturbs the stream: timing and measuring are read-only on the
+  ## RNG, so the same seed gives the identical cases with or without
+  ## `health`. Timing is per-case wall clock at millisecond resolution —
+  ## coarse by design; it is a CI-shape heuristic, not a profiler.
+  ##
   ## Regression corpus: `regressions` is a list of seeds replayed *before*
   ## the random sweep. Copy the seed from a failing run's FAIL line into
   ## the list — each replay runs the identical stream (same seed → same
@@ -563,9 +666,14 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     result = true
     var counts = initTable[string, int]()
     var discards = 0
+    var evaluated = 0
+    var totalMs = 0.0
+    var totalBytes = 0
     for i in 0 ..< n:
       rr.size = min(100, i * 100 div max(n, 1))
       let x = gen(rr)
+      if not isReplay:
+        totalBytes += approxSize(x)
       if assume != nil:
         var holds = false
         try:
@@ -599,6 +707,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
             seen.add(t)
             counts.mgetOrPut(t, 0) += 1
       var failed = false
+      let t0 = getMonoTime()
       try:
         failed = not prop(x)
       except CatchableError as e:
@@ -607,6 +716,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       except Defect as d:
         echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
         failed = true
+      if not isReplay:
+        inc evaluated
+        totalMs += inMilliseconds(getMonoTime() - t0).float
       if failed:
         result = false
         var minimal = x
@@ -633,6 +745,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     else:
       if classify != nil:
         if not reportCoverage(name, counts, n, cover): return false
+      if not reportHealth(name, totalMs, totalBytes, evaluated, discards,
+                          health): return false
       if discards > 0:
         echo "ok [", name, "]: ", n, " cases, ", discards, " discarded"
       else:

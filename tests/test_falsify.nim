@@ -849,6 +849,112 @@ check("exception in assume fails the run", not assumeExOk)
 check("exception in assume reported like a failure",
   "FAIL [assume-ex]: exception in assume: boom" in assumeExOut)
 
+# --- Health checks (issue #25) ---
+
+# approxSize: order-of-magnitude byte sizes.
+check("approxSize scalar", approxSize(5) == sizeof(int))
+check("approxSize string", approxSize("abc") == sizeof("") + 3)
+check("approxSize seq", approxSize(@[1, 2, 3]) == sizeof(@[1]) + 3 * sizeof(1))
+
+# trippedChecks logic, direct.
+let h0 = defaultHealth()
+check("default health trips on nothing",
+  trippedChecks(0.0, 100, 100, 0, h0) == {})
+check("too-slow trips", hcTooSlow in trippedChecks(10000.0, 100, 100, 0, h0))
+check("data-too-large trips",
+  hcDataTooLarge in trippedChecks(0.0, 100 * 2 * (1 shl 20), 100, 0, h0))
+check("discard-heavy trips",
+  hcDiscardHeavy in trippedChecks(0.0, 100, 100, 90, h0))
+check("few-examples trips",
+  hcFewExamples in trippedChecks(0.0, 100, 5, 0, h0))
+check("zero evaluated trips only few-examples",
+  trippedChecks(0.0, 0, 0, 0, h0) == {hcFewExamples})
+check("disabled thresholds never trip",
+  trippedChecks(1e18, high(int), 100, 100,
+    HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
+                 maxDiscardRatio: 0.0, minExamples: 0, failOn: {})) == {})
+
+# Health warns by default: a slow property passes, with a HEALTH line.
+proc slowRun(fail: bool): tuple[ok: bool, outp: string] =
+  var r = initRng(7)
+  let h = HealthChecks(maxMeanCaseMs: 1.0, maxMeanInputBytes: 0,
+                       maxDiscardRatio: 0.0, minExamples: 0,
+                       failOn: (if fail: {hcTooSlow} else: {}))
+  var ok = false
+  let o = captureOutput:
+    ok = forAll("slow-prop", r, 20,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = (os.sleep(5); x >= 0),
+      shrinkInt, health = h)
+  (ok, o)
+
+let (slowOk, slowOut) = slowRun(false)
+check("slow property still passes by default", slowOk)
+check("slow property prints HEALTH too-slow line",
+  "HEALTH [slow-prop]: too-slow" in slowOut)
+let (slowFailOk, slowFailOut) = slowRun(true)
+check("failOn turns too-slow into a failure", not slowFailOk)
+check("failed health check prints FAIL line",
+  "FAIL [slow-prop]: too-slow" in slowFailOut)
+
+# data-too-large: fixed 5000-char inputs against a 1000-byte threshold.
+var rBigH = initRng(11)
+var bigOk = true
+let bigOut = captureOutput:
+  bigOk = forAll("big-prop", rBigH, 30,
+    proc(r: var Rng): string = "x".repeat(5000),
+    proc(s: string): bool = s.len == 5000,
+    shrinkString,
+    health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 1000,
+                          maxDiscardRatio: 0.0, minExamples: 0,
+                          failOn: {hcDataTooLarge}))
+check("data-too-large fails the run when in failOn", not bigOk)
+check("data-too-large line reports mean bytes",
+  "HEALTH" notin bigOut and "FAIL [big-prop]: data-too-large" in bigOut)
+
+# discard-heavy: an assume discarding ~90% trips the soft warning.
+var rDisH = initRng(424242)
+var disOk = true
+let disOut = captureOutput:
+  disOk = forAll("discardy", rDisH, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = true,
+    shrinkInt,
+    assume = proc(x: int): bool = x > 90,
+    health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
+                          maxDiscardRatio: 0.5, minExamples: 0,
+                          failOn: {hcDiscardHeavy}))
+check("discard-heavy fails the run when in failOn", not disOk)
+check("discard-heavy line reports the ratio",
+  "FAIL [discardy]: discard-heavy" in disOut)
+
+# few-examples: a 5-case sweep against a 10-case minimum warns but passes.
+var rFewH = initRng(3)
+var fewOk = false
+let fewOut = captureOutput:
+  fewOk = forAll("tiny", rFewH, 5,
+    proc(r: var Rng): int = r.genInt(0, 10),
+    proc(x: int): bool = x >= 0,
+    shrinkInt,
+    health = HealthChecks(maxMeanCaseMs: 0.0, maxMeanInputBytes: 0,
+                          maxDiscardRatio: 0.0, minExamples: 10, failOn: {}))
+check("few-examples warns but the sweep still passes", fewOk)
+check("few-examples line printed",
+  "HEALTH [tiny]: few-examples" in fewOut)
+
+# Health never perturbs the stream: a failing run reports identically with
+# health enabled or fully disabled.
+proc failingHealthRun(seed: uint64, withHealth: bool): string =
+  var r = initRng(seed)
+  captureOutput:
+    discard forAll("replay-health", r, 100,
+      proc(r: var Rng): int = r.genInt(0, 100),
+      proc(x: int): bool = x <= 7,
+      shrinkInt,
+      health = (if withHealth: defaultHealth() else: HealthChecks()))
+check("health on/off: identical failure output",
+  failingHealthRun(424242, true) == failingHealthRun(424242, false))
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
