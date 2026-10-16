@@ -482,7 +482,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 shrink: proc(x: T): seq[T] = nil,
                 regressions: seq[uint64] = @[],
                 classify: proc(x: T): seq[string] = nil,
-                cover: seq[CoverReq] = @[]): bool =
+                cover: seq[CoverReq] = @[],
+                assume: proc(x: T): bool = nil,
+                maxDiscards: int = 500): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
   ## case, then return false. Returns true iff all cases pass.
@@ -527,6 +529,26 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## generated value, not the RNG, so the same seed produces the identical
   ## case stream whether or not `classify` is given.
   ##
+  ## Preconditions: `assume` is the property-level precondition
+  ## (QuickCheck `==>`). A case failing `assume` is *discarded* — counted
+  ## and reported in the ok line (`ok [name]: 200 cases, 37 discarded`),
+  ## never a failure, and never classified. If discards exceed
+  ## `maxDiscards` (default 500) the run aborts with a gave-up line and
+  ## returns false: an unsatisfiable precondition fails loud instead of
+  ## spinning. An exception or defect *inside* `assume` is a programming
+  ## error and fails the run like a property failure.
+  ##
+  ## Discarded draws still consume RNG, so the case stream is identical
+  ## with or without `assume` — only which cases get evaluated changes,
+  ## and the FAIL line's case number is the draw index in that stream.
+  ## `assume` applies to regression replays too: a replayed seed whose
+  ## case now fails `assume` is discarded, not failed — the property
+  ## changed, not the stream.
+  ##
+  ## Prefer narrowing the generator over heavy filtering — same advice as
+  ## `genSuchThat`: a precondition that discards most cases is usually a
+  ## generator that should have produced satisfying cases directly.
+  ##
   ## Regression corpus: `regressions` is a list of seeds replayed *before*
   ## the random sweep. Copy the seed from a failing run's FAIL line into
   ## the list — each replay runs the identical stream (same seed → same
@@ -540,9 +562,27 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   proc runSweep(rr: var Rng, isReplay: bool): bool =
     result = true
     var counts = initTable[string, int]()
+    var discards = 0
     for i in 0 ..< n:
       rr.size = min(100, i * 100 div max(n, 1))
       let x = gen(rr)
+      if assume != nil:
+        var holds = false
+        try:
+          holds = assume(x)
+        except CatchableError as e:
+          echo "FAIL [", name, "]: exception in assume: ", e.msg
+          return false
+        except Defect as d:
+          echo "FAIL [", name, "]: defect in assume: ", d.name, ": ", d.msg
+          return false
+        if not holds:
+          inc discards
+          if discards > maxDiscards:
+            echo "FAIL [", name, "]: gave up: discarded ", discards,
+              " > maxDiscards ", maxDiscards, " cases"
+            return false
+          continue
       if not isReplay and classify != nil:
         var tags: seq[string] = @[]
         try:
@@ -593,7 +633,10 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     else:
       if classify != nil:
         if not reportCoverage(name, counts, n, cover): return false
-      echo "ok [", name, "]: ", n, " cases"
+      if discards > 0:
+        echo "ok [", name, "]: ", n, " cases, ", discards, " discarded"
+      else:
+        echo "ok [", name, "]: ", n, " cases"
   doAssert classify != nil or cover.len == 0,
     "forAll: `cover` requires `classify`"
   result = true

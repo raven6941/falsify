@@ -786,6 +786,69 @@ check("forAll with genMap generator passes",
     proc(x: int): bool = x mod 2 == 0,
     shrinkInt))
 
+# assume: precondition discards non-satisfying cases; property checked on the rest.
+var rAssume1 = initRng(424242)
+var assumeOk = false
+let assumeOut = captureOutput:
+  assumeOk = forAll("assume-pos", rAssume1, 200,
+    proc(r: var Rng): int = r.genInt(-10, 10),
+    proc(x: int): bool = x >= 1,
+    shrinkInt,
+    assume = proc(x: int): bool = x > 0)
+check("assume discards non-satisfying cases and passes", assumeOk)
+check("assume reports discard count in ok line",
+  "ok [assume-pos]" in assumeOut and "discarded" in assumeOut)
+
+# assume: same seed -> identical output, so the discard count is deterministic.
+var rAssume2 = initRng(424242)
+let assumeOut2 = captureOutput:
+  discard forAll("assume-pos", rAssume2, 200,
+    proc(r: var Rng): int = r.genInt(-10, 10),
+    proc(x: int): bool = x >= 1,
+    shrinkInt,
+    assume = proc(x: int): bool = x > 0)
+check("assume discard count deterministic per seed", assumeOut == assumeOut2)
+
+# assume: unsatisfiable precondition hits the discard cap and fails loud.
+var rAssume3 = initRng(7)
+var gaveUpOk = true
+let gaveUpOut = captureOutput:
+  gaveUpOk = forAll("assume-impossible", rAssume3, 200,
+    proc(r: var Rng): int = r.genInt(0, 10),
+    proc(x: int): bool = true,
+    assume = proc(x: int): bool = x == 424242,
+    maxDiscards = 20)
+check("unsatisfiable assume fails the run", not gaveUpOk)
+check("unsatisfiable assume prints gave-up line with counts",
+  "FAIL [assume-impossible]" in gaveUpOut and
+  "gave up: discarded 21 > maxDiscards 20" in gaveUpOut)
+
+# assume: maxDiscards = 0 tolerates no discards.
+var rAssume4 = initRng(7)
+var zeroOk = true
+let zeroOut = captureOutput:
+  zeroOk = forAll("assume-zero", rAssume4, 200,
+    proc(r: var Rng): int = r.genInt(-10, -1),
+    proc(x: int): bool = true,
+    assume = proc(x: int): bool = x > 0,
+    maxDiscards = 0)
+check("maxDiscards = 0 gives up on first discard", not zeroOk)
+check("maxDiscards = 0 prints gave-up line", "gave up" in zeroOut)
+
+# assume: an exception inside assume is a programming error — fails loud.
+var rAssume5 = initRng(7)
+var assumeExOk = true
+let assumeExOut = captureOutput:
+  assumeExOk = forAll("assume-ex", rAssume5, 50,
+    proc(r: var Rng): int = r.genInt(5, 5),
+    proc(x: int): bool = true,
+    assume = proc(x: int): bool =
+      if x == 5: raise newException(ValueError, "boom")
+      else: x >= 0)
+check("exception in assume fails the run", not assumeExOk)
+check("exception in assume reported like a failure",
+  "FAIL [assume-ex]: exception in assume: boom" in assumeExOut)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
