@@ -77,6 +77,23 @@ let v = r.genFrequency([(9, r.genInt(0, 100)),    # the common case
 `genOneOf([g0, g1, g2])` is uniform choice among generator expressions;
 `genElements(xs)` picks a value from `xs`.
 
+`genShuffle(xs)` permutes a seq (Fisher-Yates, QuickCheck `shuffle`
+style) — the generator for ordering properties:
+
+```nim
+let shuffled = r.genShuffle(xs)
+check sorted(shuffled) == sorted(xs)   # always holds by construction
+assert mySort(shuffled) == mySort(xs)  # the actual property
+```
+
+It returns a new seq and leaves the input untouched; empty and
+single-element inputs return unchanged and draw nothing. The draws are
+exactly the Fisher-Yates swaps, deterministic per seed.
+`genPermutation(n)` is the index form — a random permutation of `0 ..< n`
+for when the ordering itself is the value (permuting several parallel
+arrays at once). Both draw the identical swap sequence; either earns its
+keep depending on which side of the permutation you need.
+
 `genOneOf` and `genFrequency` are macros, not procs, and this is
 deliberate: a proc taking a *collection* of generator procs cannot accept
 inline lambdas in Nim. The compiler infers `{.noSideEffect, gcsafe.}` on a
@@ -115,8 +132,9 @@ so pick by what the property needs:
   let hand = r.genUniqueInts(0, 51, 5)  # a 5-card hand, no duplicates
   ```
 
-- `genShuffle(xs)` — Fisher-Yates permutation (#34, in progress); for reordering
-  properties like `sorted(shuffled) == sorted(original)`.
+- `genShuffle(xs)` — Fisher-Yates permutation (see "Weighted and
+  categorical choice" above); for reordering properties like
+  `sorted(shuffled) == sorted(original)`.
 
 ## Constrained generation
 
@@ -561,6 +579,7 @@ use.
 - **Generators**: `genBool`, `genInt(lo, hi)`, `genFloat(lo, hi)`,
   `genChar`, `genString(maxLen)`, `genSeq[T](maxLen, gen)`,
   `genFrequency[T](choices)`, `genOneOf[T](gens)`, `genElements[T](xs)`,
+  `genPermutation(n)`, `genShuffle[T](xs)`,
   `genSuchThat[T](gen, pred, maxRetries = 100)`,
   `genMap[T, U](r, gen, f)`, `genBind[T, U](r, gen, k)`,
   `genPair[T, U]`, `genTriple[T, U, V]`,

@@ -241,6 +241,38 @@ proc genElements*[T](r: var Rng, xs: openArray[T]): T =
   doAssert xs.len > 0, "genElements: empty xs"
   xs[r.below(xs.len)]
 
+proc genPermutation*(r: var Rng, n: int): seq[int] =
+  ## Random permutation of `0 ..< n` (Fisher-Yates). The index form of
+  ## `genShuffle`: use it when the permutation itself is the value —
+  ## random orderings as data, permuting indices into several parallel
+  ## arrays, drawing derangements-by-filtering.
+  ##
+  ## The draws are exactly the Fisher-Yates swaps (`below(i+1)` for
+  ## `i` from `n-1` down to 1), so the stream is deterministic per seed
+  ## and identical in shape to `genShuffle`'s. `n <= 1` draws nothing:
+  ## the trivial permutation costs zero RNG.
+  doAssert n >= 0, "genPermutation: negative n"
+  result = newSeq[int](n)
+  for i in 0 ..< n: result[i] = i
+  for i in countdown(n - 1, 1):
+    let j = r.below(i + 1)
+    swap(result[i], result[j])
+
+proc genShuffle*[T](r: var Rng, xs: seq[T]): seq[T] =
+  ## Random permutation of `xs` (Fisher-Yates), QuickCheck `shuffle`
+  ## style. Returns a new seq; the input is untouched. The canonical
+  ## generator for ordering properties: `sorted(r.genShuffle(xs)) ==
+  ## sorted(xs)` always holds, so a sorting property over a shuffled
+  ## input tests exactly the ordering claim, not the generator.
+  ##
+  ## The draws are exactly the Fisher-Yates swaps (`below(i+1)` for `i`
+  ## from `len-1` down to 1), deterministic per seed. Empty and
+  ## single-element inputs return unchanged and draw nothing — the
+  ## trivial loop is free.
+  result = xs
+  for i in countdown(result.len - 1, 1):
+    let j = r.below(i + 1)
+    swap(result[i], result[j])
 proc genSubseq*[T](r: var Rng, xs: openArray[T]): seq[T] =
   ## Binomial subsequence: each element of `xs` is kept with probability
   ## 1/2 (QuickCheck `sublistOf`); order is preserved and `xs` is untouched.

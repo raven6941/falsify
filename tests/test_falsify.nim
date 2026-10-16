@@ -4,6 +4,7 @@
 import falsify
 import std/math
 import std/strutils
+import std/algorithm
 
 var failures = 0
 template check(name: string, cond: bool) =
@@ -379,6 +380,76 @@ try:
 except AssertionDefect:
   inc emptyErrs
 check("empty genElements / non-positive weight raise", emptyErrs == 2)
+
+# genShuffle: output is a permutation of the input; input is untouched.
+var shuffleR = initRng(424242)
+var shIsPerm = true
+var shInputUntouched = true
+for _ in 0 ..< 300:
+  let n = shuffleR.below(15)
+  var xs = newSeq[int](n)
+  for i in 0 ..< n: xs[i] = shuffleR.genInt(-50, 50)
+  let copy = xs
+  let shuffled = shuffleR.genShuffle(xs)
+  if sorted(shuffled) != sorted(copy): shIsPerm = false
+  if xs != copy: shInputUntouched = false
+check("genShuffle output is a permutation of the input", shIsPerm)
+check("genShuffle leaves the input untouched", shInputUntouched)
+
+# genShuffle with duplicates: multiset preserved, not just the set.
+var dupR = initRng(99)
+var dupOk = true
+for _ in 0 ..< 100:
+  let shuffled = dupR.genShuffle(@[1, 1, 2, 3, 3, 3])
+  if sorted(shuffled) != @[1, 1, 2, 3, 3, 3]: dupOk = false
+check("genShuffle preserves duplicates", dupOk)
+
+# genPermutation: a permutation of 0 ..< n.
+var pmR = initRng(424242)
+var pmIsPerm = true
+for _ in 0 ..< 200:
+  let n = pmR.below(20)
+  let p = pmR.genPermutation(n)
+  var seen = newSeq[bool](n)
+  for v in p:
+    if v < 0 or v >= n: pmIsPerm = false
+    elif seen[v]: pmIsPerm = false
+    else: seen[v] = true
+  if p.len != n: pmIsPerm = false
+check("genPermutation yields a permutation of 0..<n", pmIsPerm)
+
+# Determinism: same seed -> identical permutation; different seeds differ.
+var d1 = initRng(12345)
+var d2 = initRng(12345)
+var d3 = initRng(54321)
+let pA = d1.genShuffle(@[1, 2, 3, 4, 5, 6, 7, 8])
+let pB = d2.genShuffle(@[1, 2, 3, 4, 5, 6, 7, 8])
+let pC = d3.genShuffle(@[1, 2, 3, 4, 5, 6, 7, 8])
+check("genShuffle deterministic per seed", pA == pB)
+check("genShuffle varies across seeds", pA != pC)
+
+# Empty / single-element: returned unchanged, and no RNG is consumed
+# (the trivial loop draws nothing).
+var z1 = initRng(777)
+let zEmpty = z1.genShuffle(newSeq[int]())
+let zOne = z1.genShuffle(@[42])
+var z2 = initRng(777)
+check("genShuffle empty and singleton return unchanged",
+  zEmpty.len == 0 and zOne == @[42] and z1.next() == z2.next())
+var q1 = initRng(888)
+let qp = q1.genPermutation(1)
+var q2 = initRng(888)
+check("genPermutation(1) draws nothing and is [0]",
+  qp == @[0] and q1.next() == q2.next())
+
+# Negative n is a usage error.
+var negErrs = 0
+try:
+  var nr = initRng(1)
+  discard nr.genPermutation(-1)
+except AssertionDefect:
+  inc negErrs
+check("genPermutation with negative n raises", negErrs == 1)
 
 # Combinators are part of the stream: same seed -> same sequence.
 var rc1 = initRng(424242)
@@ -861,13 +932,13 @@ check("shrinkFloat infinities shrink to 0.0",
 check("shrinkFloat of 0.0 has no candidates", shrinkFloat(0.0) == @[])
 
 # End-to-end: a float threshold property shrinks to 0.0.
-proc floatThreshRun(seed: uint64) =
+proc floatThreshuffleRun(seed: uint64) =
   var r = initRng(seed)
   discard forAll("float-thresh", r, 500,
     proc(r: var Rng): float = r.genFloat(0.0, 10.0),
     proc(x: float): bool = x >= 5.0,
     shrinkFloat)
-let floatOut = captureOutput(floatThreshRun(424242))
+let floatOut = captureOutput(floatThreshuffleRun(424242))
 check("float threshold shrinks to minimal 0.0",
   "FAIL [float-thresh]" in floatOut and "minimal input: 0.0" in floatOut)
 
