@@ -1,7 +1,7 @@
 # Package
 
 version       = "0.1.0"
-author        = "Wally"
+author        = "raven6941"
 description   = "Property-based testing for Nim: falsify your properties"
 license       = "MIT"
 srcDir        = "src"
