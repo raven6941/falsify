@@ -294,6 +294,46 @@ FAIL [int-edges]: coverage shortfall: "edge": 31.0% < required 50.0%
 analogue of QuickCheck's `cover` / Hypothesis's `target`: it turns "we
 exercised the edge cases" from a hope into a checked claim.
 
+## Health checks
+
+A green sweep can still be degenerate: every case finishing in a
+microsecond means the generator found a trivial corner; every case taking
+seconds means CI can't afford the suite; a precondition discarding 95% of
+draws means the property is barely being tested. Pass `health` (default
+`defaultHealth()`) and `forAll` watches for these shapes — Hypothesis
+`HealthCheck` style — and prints a line per tripped check:
+
+```
+HEALTH [slow-prop]: too-slow: mean case time 63.2ms > 50.0ms
+HEALTH [tiny]: few-examples: only 5 cases evaluated < 10 minimum
+```
+
+The four checks:
+
+- `hcTooSlow` — mean per-case property time (generation excluded) above
+  `maxMeanCaseMs` (default 50.0ms). Millisecond resolution, coarse by
+  design: a CI-shape heuristic, not a profiler.
+- `hcDataTooLarge` — mean generated input size above `maxMeanInputBytes`
+  (default 1 MiB). Size is `approxSize`: the value plus one level of
+  element payload — order of magnitude, not exact.
+- `hcDiscardHeavy` — discards per evaluated case above `maxDiscardRatio`
+  (default 0.5). The soft warning before `maxDiscards`' hard abort.
+- `hcFewExamples` — fewer than `minExamples` (default 10) cases evaluated.
+
+Warnings by default — a green run stays green. List checks in `failOn` to
+make them fail the run instead:
+
+```nim
+  health = HealthChecks(maxMeanCaseMs: 10.0, maxMeanInputBytes: 1 shl 20,
+                        maxDiscardRatio: 0.5, minExamples: 10,
+                        failOn: {hcTooSlow})
+```
+
+Health covers the random sweep only (like classification), and like
+classification it never perturbs the stream: timing and measuring are
+read-only on the RNG, so the same seed gives the identical cases with or
+without `health`. Set any threshold to 0 to disable that check.
+
 ## Writing a shrinker
 
 A shrinker is `proc(x: T): seq[T]` returning candidates ordered
