@@ -25,6 +25,7 @@
 ## hard-code that seed as a regression case.
 
 import std/macros
+import std/math
 import std/tables
 import std/algorithm
 import std/strutils
@@ -93,15 +94,41 @@ proc genInt*(r: var Rng, lo, hi: int): int =
     return cands[r.below(m)]
   lo + r.below(hi - lo + 1)
 
-proc genFloat*(r: var Rng, lo, hi: float): float =
+proc genFloat*(r: var Rng, lo, hi: float, allowNaN = false,
+               allowInf = false): float =
   ## Float in [lo, hi).
   ##
-  ## Bug-finding bias: with probability 1/4, returns `lo`, or 0.0 when it
-  ## lies in [lo, hi); otherwise uniform over [lo, hi).
+  ## Bug-finding bias: with probability 1/4, returns `lo`, or a signed
+  ## zero / subnormal pick when 0.0 lies in [lo, hi) — 0.0 and -0.0 are
+  ## equally likely there (they differ under division), with small
+  ## probability each of ±5e-324 (the minimum subnormal magnitude; the
+  ## negative one only when `lo < 0.0`, so the result stays in range);
+  ## otherwise uniform over [lo, hi).
+  ##
+  ## Float specials: NaN and ±Inf are *not* in `[lo, hi)` and are never
+  ## generated unless you opt in — `allowNaN` / `allowInf`, both default
+  ## false. The opt-in exists because these are where float code breaks,
+  ## but the default keeps the documented range contract: a generator that
+  ## silently hands you NaN when it promised `[lo, hi)` is a generator
+  ## bug, not a found bug. With either flag set, probability 1/16 draws a
+  ## special instead of the usual distribution: NaN when `allowNaN` (half
+  ## the specials when both flags are set), otherwise ±Inf. `shrinkFloat`
+  ## already shrinks NaN/±Inf to 0.0, so a special-triggered failure still
+  ## shrinks and reports sanely.
   doAssert lo <= hi, "genFloat: lo > hi"
+  if (allowNaN or allowInf) and r.below(16) == 0:
+    if allowNaN and (not allowInf or r.genBool()):
+      return NaN
+    return if r.genBool(): Inf else: -Inf
   if r.below(4) == 0:
     if lo <= 0.0 and 0.0 < hi and r.below(2) == 0:
-      return 0.0
+      case r.below(8)
+      of 0: return -0.0          # == 0.0, always in range here
+      of 1: return 5e-324        # smallest positive double < any hi > 0.0
+      of 2:
+        if lo < 0.0: return -5e-324  # needs lo strictly below zero
+        return 5e-324
+      else: return 0.0
     return lo
   lo + (hi - lo) * (r.next().float / high(uint64).float)
 

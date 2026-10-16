@@ -42,16 +42,26 @@ same):
 - `genInt(lo, hi)`: with probability 1/4, drawn uniformly from the
   interesting values in range — `lo`, `hi`, and 0, −1, 1 when in range;
   otherwise uniform over `[lo, hi]`.
-- `genFloat(lo, hi)`: with probability 1/4, returns `lo` or 0.0 (when 0.0
-  lies in `[lo, hi)`); otherwise uniform over `[lo, hi)`.
+- `genFloat(lo, hi)`: with probability 1/4, returns `lo`, or — when 0.0
+  lies in `[lo, hi)` — a signed-zero/subnormal pick: 0.0 and −0.0 equally
+  likely (they differ under division), with small probability each of
+  ±5e-324, the minimum subnormal magnitude (the negative one only when
+  `lo < 0.0`, so the result stays in range); otherwise uniform over
+  `[lo, hi)`. NaN and ±Inf are never generated unless you opt in:
+  `genFloat(r, lo, hi, allowNaN = true, allowInf = true)` draws a special
+  with probability 1/16 instead of the usual distribution (NaN when
+  `allowNaN`, else ±Inf). The opt-in exists because these are where float
+  code breaks, but the default keeps the documented `[lo, hi)` contract —
+  a generator that silently hands you NaN when it promised a range is a
+  generator bug, not a found bug.
 - `genString` / `genSeq`: with probability 1/4, the length is 0 or 1
   (empty and single-element cases get their turn); otherwise uniform over
   `[0, maxLen]`.
 
 The bias is part of the stream, not a coin flipped outside it: same seed
-still means same sequence, bit for bit. But note the distributions changed
-in 0.2.0 — a seed that produced one stream under 0.1.0 produces a different
-stream now.
+still means same sequence, bit for bit. But note the distributions evolve
+between versions — a seed that produced one stream under 0.2.0 produces a
+different stream now (`genFloat`'s zero-bias gained −0.0 and subnormals).
 
 ## Weighted and categorical choice
 
