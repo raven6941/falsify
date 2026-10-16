@@ -524,9 +524,9 @@ that check.
 
 ## Settings profiles
 
-The tuning knobs — `maxDiscards`, `deadlineMs`, `maxShrinks`, `health` —
-live in one `FalsifySettings` object instead of sixteen parameters at
-every call site. The case count `n` stays positional (it is the most-set
+The tuning knobs — `maxDiscards`, `deadlineMs`, `maxShrinks`,
+`health`, `verbosity` — live in one `FalsifySettings` object instead of
+sixteen parameters at every call site. The case count `n` stays positional (it is the most-set
 knob), and everything per-property (`gen`, `prop`, `shrink`,
 `regressions`, `examples`, `classify`, `cover`, `assume`, `target`)
 stays a `forAll` parameter: settings hold only tuning.
@@ -558,6 +558,18 @@ CI runs `FALSIFY_PROFILE=ci nim c -r tests/...`; local runs use the
 defaults. (Breaking change, pre-1.0: the individual knob parameters
 `maxDiscards`, `deadlineMs`, `maxShrinks`, `health` were removed from
 `forAll` in favor of `settings`.)
+
+`verbosity` controls how much `forAll` prints: `vNormal` (the default) is
+today's reporting; `vQuiet` prints only failures — no ok lines, no
+`HEALTH` warnings, no coverage tables — for CI logs that should stay
+silent on green; `vVerbose` adds the shrink trajectory (each accepted
+shrink step) and a settings summary in the ok line, all deterministic
+per seed:
+
+```nim
+var s = withProfile("ci")
+s.verbosity = vQuiet  # silent unless something fails
+```
 
 ## Targeted generation
 
