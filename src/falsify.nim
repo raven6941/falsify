@@ -706,6 +706,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 prop: proc(x: T): bool,
                 shrink: proc(x: T): seq[T] = nil,
                 regressions: seq[uint64] = @[],
+                examples: seq[T] = @[],
                 classify: proc(x: T): seq[string] = nil,
                 cover: seq[CoverReq] = @[],
                 assume: proc(x: T): bool = nil,
@@ -872,6 +873,97 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## after every replay passes. The list is explicit and checked in —
   ## no hidden on-disk database, no state the next reader can't see
   ## (Hypothesis's example database, minus the magic directory).
+  ##
+  ## Explicit examples: `examples` is a list of literal values evaluated
+  ## *before* the regression replays and the sweep — the known-interesting
+  ## inputs you already have (the boundary you reasoned about by hand,
+  ## the regression case from a bug report), Hypothesis `@example` style.
+  ## A failing example fails the run immediately with
+  ## `FAIL [name]: example <i>, minimal input: <value>` — the value *is*
+  ## the recipe, no seed needed — and the failing example shrinks with
+  ## the same shrinker for a consistent minimal-input line. Examples
+  ## consume no RNG: the case stream is byte-identical with and without
+  ## `examples`, so the same seed gives the same sweep cases either way.
+  ## An example failing `assume` is a programming error, not a discard —
+  ## it fails the run (a hand-written input that violates the
+  ## precondition is a bug in the test, not in the generator). Examples
+  ## are outside classification, coverage, health, targeting, and the
+  ## per-case deadline: they are deliberate, not sampled, and measuring
+  ## them would distort the sweep's statistics.
+  proc shrinkMinimal(x: T): tuple[val: T, budgetExhausted: bool] =
+    ## Greedy-shrink `x` to a minimal still-failing input (candidates
+    ## most-aggressive first), honoring the `maxShrinks` budget.
+    ## `prop` exceptions/defects count as failures, same as in the sweep.
+    result = (x, false)
+    if shrink == nil: return result
+    var shrinksUsed = 0
+    var cands = shrink(result[0])
+    while cands.len > 0:
+      var progressed = false
+      for c in cands:
+        if maxShrinks > 0 and shrinksUsed >= maxShrinks:
+          return (result[0], true)
+        inc shrinksUsed
+        var cf = false
+        try: cf = not prop(c)
+        except CatchableError: cf = true
+        except Defect: cf = true
+        if cf:
+          result[0] = c
+          cands = shrink(result[0])
+          progressed = true
+          break
+      if not progressed: break
+
+  proc runExamples(): bool =
+    ## Evaluate the explicit `examples` before everything else. No RNG is
+    ## touched here, so the sweep stream is byte-identical with and without
+    ## `examples` — same seed gives the same sweep cases either way.
+    result = true
+    for ei in 0 ..< examples.len:
+      let x = examples[ei]
+      if assume != nil:
+        var holds = false
+        try:
+          holds = assume(x)
+        except CatchableError as ae:
+          echo "FAIL [", name, "]: exception in assume on example ", ei,
+            ": ", ae.msg
+          return false
+        except Defect as ad:
+          echo "FAIL [", name, "]: defect in assume on example ", ei, ": ",
+            ad.name, ": ", ad.msg
+          return false
+        if not holds:
+          # A hand-written input failing `assume` is a programming error —
+          # the author chose this value deliberately — not a discard.
+          echo "FAIL [", name, "]: example ", ei, " failed assume: ", $x
+          return false
+      var failed = false
+      try:
+        failed = not prop(x)
+      except CatchableError as pe:
+        echo "FAIL [", name, "]: exception on example ", ei, ": ", pe.msg
+        failed = true
+      except Defect as pd:
+        echo "FAIL [", name, "]: defect on example ", ei, ": ", pd.name,
+          ": ", pd.msg
+        failed = true
+      if failed:
+        # The value *is* the replay recipe: no seed needed. Shrink with
+        # the same shrinker for a consistent minimal-input line.
+        let (minimal, budgetExhausted) = shrinkMinimal(x)
+        var failLine = "FAIL [" & name & "]: example " & $ei & ": " & $x &
+          ", minimal input: " & $minimal
+        if maxShrinks > 0:
+          if budgetExhausted:
+            failLine &= " (shrink budget " & $maxShrinks &
+              " exhausted, may not be minimal)"
+          else:
+            failLine &= " (shrunk to minimum, budget " & $maxShrinks & ")"
+        echo failLine
+        return false
+
   proc runSweep(rr: var Rng, isReplay: bool): bool =
     result = true
     var counts = initTable[string, int]()
@@ -954,28 +1046,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         totalMs += caseMs
       if failed:
         result = false
-        var minimal = x
-        var shrinksUsed = 0
-        var budgetExhausted = false
-        if shrink != nil:
-          var cands = shrink(minimal)
-          while cands.len > 0:
-            var progressed = false
-            for c in cands:
-              if maxShrinks > 0 and shrinksUsed >= maxShrinks:
-                budgetExhausted = true
-                break
-              inc shrinksUsed
-              var cf = false
-              try: cf = not prop(c)
-              except CatchableError: cf = true
-              except Defect: cf = true
-              if cf:
-                minimal = c
-                cands = shrink(minimal)
-                progressed = true
-                break
-            if budgetExhausted or not progressed: break
+        let (minimal, budgetExhausted) = shrinkMinimal(x)
         var failLine = "FAIL [" & name & "]: seed: " & $rr.seed & ", case " & $i &
           ", minimal input: " & $minimal
         if maxShrinks > 0:
@@ -994,6 +1065,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       if not reportHealth(name, totalMs, totalBytes, evaluated, discards,
                           health): return false
       var line = "ok [" & name & "]: " & $n & " cases"
+      if examples.len > 0:
+        line = "ok [" & name & "]: " & $examples.len & " examples, " & $n &
+          " cases"
       if discards > 0: line &= ", " & $discards & " discarded"
       if target != nil and haveBest:
         line &= ", best target score: " &
@@ -1004,6 +1078,7 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   doAssert deadlineMs >= 0, "forAll: `deadlineMs` must be non-negative"
   doAssert maxShrinks >= 0, "forAll: `maxShrinks` must be non-negative"
   result = true
+  if not runExamples(): return false
   for seed in regressions:
     var rr = initRng(seed)
     if not runSweep(rr, isReplay = true): return false

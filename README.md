@@ -285,6 +285,29 @@ let ok = forAll("reverse-twice", r, 200, gen, prop, shrink,
   regressions = @[424242'u64, 987654321'u64])
 ```
 
+Sometimes you already know the interesting input — the regression case
+from a bug report, the boundary you reasoned about by hand. `examples`
+pins literal values into the run, Hypothesis `@example` style, evaluated
+*before* the regression replays and the sweep (most deliberate first):
+
+```nim
+let ok = forAll("clamp-roundtrip", r, 200,
+  proc(r: var Rng): int = r.genInt(-1000, 1000),
+  proc(x: int): bool = clamp(x, 0, 100) in 0 .. 100,
+  shrinkInt,
+  examples = @[0, 100, -1, 101])  # the known-bad boundaries, pinned
+```
+
+A failing example fails the run immediately — the value *is* the replay
+recipe, so no seed is needed — and shrinks with the same shrinker for a
+consistent minimal-input line. Examples consume no RNG: the sweep stream
+is byte-identical with and without them. An example failing `assume` is a
+programming error, not a discard: a hand-written input that violates the
+precondition is a bug in the test, and it fails the run. Examples sit
+outside classification, coverage, health, targeting, and the per-case
+deadline — they are deliberate, not sampled, and measuring them would
+distort the sweep's statistics.
+
 ## Preconditions
 
 Sometimes the property only makes sense on part of the input space —
@@ -589,7 +612,7 @@ use.
   `shrinkSeq[T](s, shrinkElem)`, `shrinkPair[T, U]`, `shrinkTriple[T, U, V]`,
   `shrinkSuchThat[T](x, shrinkElem, pred)`
 - **Driver**: `forAll[T](name, r, n, gen, prop, shrink = nil, regressions = @[],
-  classify = nil, cover = @[], assume = nil, maxDiscards = 500,
+  examples = @[], classify = nil, cover = @[], assume = nil, maxDiscards = 500,
   health = defaultHealth(), deadlineMs = 0, maxShrinks = 0)`; coverage
   requirements are `CoverReq` = `tuple[tag: string, minPct: float]`
 - **Stateful**: `runCommands[C, M, Sys](name, r, n, maxLen, genCmd, newModel,
