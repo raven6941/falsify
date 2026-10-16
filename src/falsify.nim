@@ -24,6 +24,9 @@
 ## hard-code that seed as a regression case.
 
 import std/macros
+import std/tables
+import std/algorithm
+import std/strutils
 
 
 type
@@ -365,11 +368,42 @@ proc shrinkTriple*[T, U, V](t: (T, U, V), shrinkT: proc(x: T): seq[T],
   for c in shrinkU(t[1]): result.add((t[0], c, t[2]))
   for c in shrinkV(t[2]): result.add((t[0], t[1], c))
 
+type CoverReq* = tuple[tag: string, minPct: float]
+  ## A coverage requirement for `forAll`: at least `minPct` percent of the
+  ## sweep's cases must carry `tag` (as assigned by `classify`). Failing a
+  ## requirement fails the run — it is the hard version of `classify`'s
+  ## printed table, turning "we exercised the edge cases" from a hope
+  ## into a checked claim.
+
+proc reportCoverage(name: string, counts: Table[string, int], total: int,
+                    cover: seq[CoverReq]): bool =
+  ## Print the observed class distribution and check `cover` requirements.
+  ## Returns true iff every requirement is met. The table prints first so
+  ## a shortfall verdict always arrives with the evidence.
+  var rows: seq[(string, int)] = @[]
+  for k, v in counts: rows.add((k, v))
+  rows.sort(proc(a, b: (string, int)): int = cmp(b[1], a[1]))
+  for (tag, cnt) in rows:
+    let pct = if total > 0: cnt.float * 100.0 / total.float else: 0.0
+    echo "cover [", name, "]: \"", tag, "\": ",
+      formatFloat(pct, ffDecimal, 1), "% (", cnt, "/", total, ")"
+  for req in cover:
+    let cnt = counts.getOrDefault(req.tag, 0)
+    let pct = if total > 0: cnt.float * 100.0 / total.float else: 0.0
+    if pct < req.minPct:
+      echo "FAIL [", name, "]: coverage shortfall: \"", req.tag, "\": ",
+        formatFloat(pct, ffDecimal, 1), "% < required ",
+        formatFloat(req.minPct, ffDecimal, 1), "%"
+      return false
+  return true
+
 proc forAll*[T](name: string, r: var Rng, n: int,
                 gen: proc(r: var Rng): T,
                 prop: proc(x: T): bool,
                 shrink: proc(x: T): seq[T] = nil,
-                regressions: seq[uint64] = @[]): bool =
+                regressions: seq[uint64] = @[],
+                classify: proc(x: T): seq[string] = nil,
+                cover: seq[CoverReq] = @[]): bool =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
   ## case, then return false. Returns true iff all cases pass.
@@ -396,6 +430,24 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## from 0 to ~100 across the run, so recursive generators (`genRecursive`)
   ## start shallow and explore deeper structures in later cases.
   ##
+  ## Coverage: `classify` bins each generated case into named classes and
+  ## `forAll` prints the observed distribution after the sweep, QuickCheck
+  ## style — a green run then says *what* it exercised, not just how many
+  ## cases it ran. `cover` makes the claim hard: each `(tag, minPct)`
+  ## requirement must be met or the run fails with a shortfall line. `cover`
+  ## without `classify` is a usage error (fails loud via doAssert).
+  ##
+  ## Classification covers the random sweep only, not the regression
+  ## replays: replays are fixed failing cases, and counting them would
+  ## distort the distribution the sweep actually produced. Each tag counts
+  ## at most once per case (duplicate tags in one `classify` result are
+  ## deduplicated). A `classify` that raises is a failure, reported with
+  ## the seed like a property failure.
+  ##
+  ## Classifying never perturbs the stream: `classify` receives only the
+  ## generated value, not the RNG, so the same seed produces the identical
+  ## case stream whether or not `classify` is given.
+  ##
   ## Regression corpus: `regressions` is a list of seeds replayed *before*
   ## the random sweep. Copy the seed from a failing run's FAIL line into
   ## the list — each replay runs the identical stream (same seed → same
@@ -408,9 +460,25 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## (Hypothesis's example database, minus the magic directory).
   proc runSweep(rr: var Rng, isReplay: bool): bool =
     result = true
+    var counts = initTable[string, int]()
     for i in 0 ..< n:
       rr.size = min(100, i * 100 div max(n, 1))
       let x = gen(rr)
+      if not isReplay and classify != nil:
+        var tags: seq[string] = @[]
+        try:
+          tags = classify(x)
+        except CatchableError as e:
+          echo "FAIL [", name, "]: exception in classify: ", e.msg
+          return false
+        except Defect as d:
+          echo "FAIL [", name, "]: defect in classify: ", d.name, ": ", d.msg
+          return false
+        var seen: seq[string] = @[]
+        for t in tags:
+          if t notin seen:
+            seen.add(t)
+            counts.mgetOrPut(t, 0) += 1
       var failed = false
       try:
         failed = not prop(x)
@@ -444,7 +512,11 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     if isReplay:
       echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
     else:
+      if classify != nil:
+        if not reportCoverage(name, counts, n, cover): return false
       echo "ok [", name, "]: ", n, " cases"
+  doAssert classify != nil or cover.len == 0,
+    "forAll: `cover` requires `classify`"
   result = true
   for seed in regressions:
     var rr = initRng(seed)

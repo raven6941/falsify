@@ -577,6 +577,99 @@ proc noRegressRun() =
 check("empty regression list behaves like before",
   "replay seed" notin captureOutput(noRegressRun()))
 
+# --- Coverage reporting: classify/collect + cover (issue #17) ---
+
+proc covRun(seed: uint64, coverReqs: seq[CoverReq] = @[]) =
+  var r = initRng(seed)
+  discard forAll("cov-int", r, 200,
+    proc(r: var Rng): int = r.genInt(-100, 100),
+    proc(x: int): bool = true,
+    classify = proc(x: int): seq[string] =
+      if x in [-100, 100, 0, -1, 1]: @["edge"] else: @["bulk"],
+    cover = coverReqs)
+
+let covA = captureOutput(covRun(424242))
+let covB = captureOutput(covRun(424242))
+check("coverage table deterministic per seed", covA == covB)
+check("coverage table reports both classes",
+  "cover [cov-int]: \"bulk\": 69.0% (138/200)" in covA and
+  "cover [cov-int]: \"edge\": 31.0% (62/200)" in covA)
+check("coverage table sorts by count desc",
+  covA.find("\"bulk\"") < covA.find("\"edge\""))
+
+# cover met -> true; unmet -> false (fixed seed, deterministic).
+var rcm = initRng(424242)
+check("cover met returns true",
+  forAll("cov-met", rcm, 200,
+    proc(r: var Rng): int = r.genInt(-100, 100),
+    proc(x: int): bool = true,
+    classify = proc(x: int): seq[string] =
+      if x in [-100, 100, 0, -1, 1]: @["edge"] else: @["bulk"],
+    cover = @[("edge", 30.0)]))
+var rcu = initRng(424242)
+check("cover unmet returns false",
+  not forAll("cov-unmet", rcu, 200,
+    proc(r: var Rng): int = r.genInt(-100, 100),
+    proc(x: int): bool = true,
+    classify = proc(x: int): seq[string] =
+      if x in [-100, 100, 0, -1, 1]: @["edge"] else: @["bulk"],
+    cover = @[("edge", 50.0)]))
+let covFail = captureOutput(covRun(424242, @[("edge", 50.0)]))
+check("coverage shortfall prints evidence then verdict",
+  "coverage shortfall" in covFail and
+  "\"edge\": 31.0% < required 50.0%" in covFail)
+
+# cover without classify is a usage error: fails loud.
+var raisedCover = false
+try:
+  var rnc = initRng(7)
+  discard forAll("cov-noclass", rnc, 10,
+    proc(r: var Rng): int = 1,
+    proc(x: int): bool = true,
+    cover = @[("x", 1.0)])
+except AssertionDefect:
+  raisedCover = true
+check("cover without classify raises AssertionDefect", raisedCover)
+
+# A raising classify is a failure, reported with the property name.
+var rrc = initRng(7)
+check("raising classify fails the run",
+  not forAll("cov-raise", rrc, 10,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = true,
+    classify = proc(x: int): seq[string] =
+      raise newException(ValueError, "boom")))
+let covRaiseOut = captureOutput(block:
+  var rrr = initRng(7)
+  discard forAll("cov-raise2", rrr, 10,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = true,
+    classify = proc(x: int): seq[string] =
+      raise newException(ValueError, "boom")))
+check("raising classify reported like a failure",
+  "FAIL [cov-raise2]: exception in classify: boom" in covRaiseOut)
+
+# Classifying never perturbs the stream: same seed, same failure report.
+proc failingClassifyRun(seed: uint64) =
+  var r = initRng(seed)
+  discard forAll("replay-me", r, 100,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = x <= 7,
+    shrinkInt,
+    classify = proc(x: int): seq[string] = @["any"])
+check("classify does not perturb the failure stream",
+  captureOutput(failingClassifyRun(424242)) == captureOutput(failingPropRun(424242)))
+
+# Duplicate tags in one classify result count once per case.
+let dupOut = captureOutput(block:
+  var rdup = initRng(11)
+  discard forAll("cov-dup", rdup, 100,
+    proc(r: var Rng): int = r.genInt(0, 9),
+    proc(x: int): bool = true,
+    classify = proc(x: int): seq[string] = @["a", "a", "b"]))
+check("duplicate tags counted once per case",
+  "\"a\": 100.0% (100/100)" in dupOut and "\"b\": 100.0% (100/100)" in dupOut)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
