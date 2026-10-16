@@ -1111,6 +1111,72 @@ check("runCommands: regression seed replays the failure",
     newCounterModel, newCounterSys, runCounter,
     regressions = @[42'u64]))
 
+# --- Targeted generation (issue #30) ---
+
+# The score pushes x toward 0 (the shrink direction). The generator is the
+# bias-free `below`, not `genInt`, so blind draws cannot lean on genInt's
+# edge bias — this isolates the targeting mechanism in the comparison.
+proc negScore(x: int): float = -x.float
+
+proc doTargetRun(seed: uint64, useShrink: bool) =
+  var r = initRng(seed)
+  let sh: proc(x: int): seq[int] =
+    if useShrink: shrinkInt else: nil
+  discard forAll("target-demo", r, 200,
+    proc(r: var Rng): int = r.below(100_000),
+    proc(x: int): bool = true,
+    sh, target = negScore)
+
+proc targetRun(seed: uint64, useShrink: bool): string =
+  captureOutput(doTargetRun(seed, useShrink))
+
+proc bestScoreOf(captured: string): float =
+  let tag = "best target score: "
+  let i = captured.find(tag)
+  doAssert i >= 0, "no best target score in output"
+  parseFloat(captured[i + tag.len .. ^1].splitLines()[0])
+
+let tOut1 = targetRun(424242, true)
+let tOut2 = targetRun(424242, true)
+check("targeting: same seed replays byte-identical output", tOut1 == tOut2)
+check("targeting: ok line reports the best score",
+  "best target score: " in tOut1)
+
+# Efficiency claim, measured not asserted: with the same generator, budget,
+# and seeds, targeting reaches a strictly higher best score than blind
+# draws. Seeds recorded (2026-10-15): on every one of these the targeted
+# run hill-climbs to exactly 0.0 while blind stops far short.
+for tSeed in [1'u64, 42, 424242, 12345]:
+  let tb = bestScoreOf(targetRun(tSeed, true))
+  let bb = bestScoreOf(targetRun(tSeed, false))
+  check("targeting beats blind on seed " & $tSeed, tb > bb)
+check("targeting: reaches the exact optimum (0.0) on seed 424242",
+  bestScoreOf(targetRun(424242, true)) == 0.0)
+
+# Blind runs are unaffected: with target unset there is no score line and
+# the ok line is exactly the old format (no extra RNG draws on that path).
+proc doBlindRun() =
+  var rBlind = initRng(424242)
+  discard forAll("target-demo", rBlind, 200,
+    proc(r: var Rng): int = r.below(100_000),
+    proc(x: int): bool = true,
+    shrinkInt)
+let blindOut = captureOutput(doBlindRun())
+check("target unset: no score line, old ok-line format",
+  "best target score" notin blindOut and
+  "ok [target-demo]: 200 cases" in blindOut)
+
+# NaN scores never become the best: no crash, no score line.
+proc doNanRun() =
+  var rNan = initRng(424242)
+  discard forAll("target-nan", rNan, 50,
+    proc(r: var Rng): int = r.genInt(0, 100),
+    proc(x: int): bool = true,
+    shrinkInt, target = proc(x: int): float = NaN)
+let nanOut = captureOutput(doNanRun())
+check("targeting: NaN scores are ignored, no crash",
+  "best target score" notin nanOut and "ok [target-nan]: 50 cases" in nanOut)
+
 if failures > 0:
   echo failures, " self-test(s) failed"
   quit(1)
