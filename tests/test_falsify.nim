@@ -218,6 +218,65 @@ check("biased generators deterministic per seed", biasDet)
 
 # Combinators (issue #2): weighted/categorical choice.
 #
+# genEnum (issue #45): uniform enum generation + shrinking toward low(T).
+
+type
+  TestColor = enum tcRed, tcGreen, tcBlue
+  TestHoley = enum thA = 1, thB = 5, thC = 9
+  TestNeg = enum tnA = -3, tnB = 4, tnC = 20
+  TestSolo = enum tsOnly
+
+# All variants appear (plain, holey, negative-ordinal, singleton).
+var re1 = initRng(424242)
+var cSeen: set[TestColor]
+var hSeen: set[TestHoley]
+var nSeen: set[TestNeg]
+for _ in 0 ..< 500:
+  cSeen.incl re1.genEnum(TestColor)
+  hSeen.incl re1.genEnum(TestHoley)
+  nSeen.incl re1.genEnum(TestNeg)
+check("genEnum covers all variants of a plain enum",
+  cSeen == {tcRed, tcGreen, tcBlue})
+check("genEnum covers all variants of a holey enum",
+  hSeen == {thA, thB, thC})
+check("genEnum covers all variants of a negative-ordinal enum",
+  nSeen == {tnA, tnB, tnC})
+var reSolo = initRng(1)
+check("genEnum on a singleton enum always returns it",
+  reSolo.genEnum(TestSolo) == tsOnly)
+
+# Roughly uniform: 500 draws over 3 variants, expected ~167 each.
+var reU = initRng(777)
+var uCounts = [0, 0, 0]
+for _ in 0 ..< 900:
+  inc uCounts[ord(reU.genEnum(TestColor))]
+check("genEnum roughly uniform",
+  uCounts[0] > 200 and uCounts[1] > 200 and uCounts[2] > 200)
+
+# Seed determinism across enum shapes.
+var reD1 = initRng(424242)
+var reD2 = initRng(424242)
+var eDet = true
+for _ in 0 ..< 100:
+  if reD1.genEnum(TestColor) != reD2.genEnum(TestColor): eDet = false
+  if reD1.genEnum(TestHoley) != reD2.genEnum(TestHoley): eDet = false
+check("genEnum deterministic per seed", eDet)
+
+# shrinkEnum: toward low(T), most-aggressive first, holes skipped.
+check("shrinkEnum shrinks toward low, most-aggressive first",
+  shrinkEnum(thC) == @[thA, thB])
+check("shrinkEnum on low(T) is empty", shrinkEnum(tcRed) == @[])
+check("shrinkEnum on singleton is empty", shrinkEnum(tsOnly) == @[])
+check("shrinkEnum skips holes", shrinkEnum(tnC) == @[tnA, tnB])
+
+# End to end: forAll with an enum generator + shrinker finds and
+# minimizes a counterexample (prop holds only for thA).
+var reEnd = initRng(424242)
+check("forAll with genEnum finds the counterexample",
+  not forAll("enum-e2e", reEnd, 200,
+    proc(r: var Rng): TestHoley = r.genEnum(TestHoley),
+    proc(h: TestHoley): bool = h == thA,
+    proc(h: TestHoley): seq[TestHoley] = shrinkEnum(h)))
 # genFrequency with weights 1:2:3 over 6000 draws: expected 1000/2000/3000,
 # sigma ~29; bands are ~+-10 sigma. The "generators" here are constant
 # expressions — the macros take expressions, not procs.

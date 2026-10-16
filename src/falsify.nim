@@ -28,6 +28,7 @@ import std/macros
 import std/math
 import std/tables
 import std/algorithm
+import std/enumutils
 import std/strutils
 import std/monotimes
 import std/times
@@ -240,6 +241,58 @@ proc genElements*[T](r: var Rng, xs: openArray[T]): T =
   ## (A plain proc: values have no laziness or lambda-typing concerns.)
   doAssert xs.len > 0, "genElements: empty xs"
   xs[r.below(xs.len)]
+
+proc enumValuesOf[T: enum](): seq[T] =
+  ## All declared values of enum `T`, in declaration order, built once
+  ## and cached per type instantiation. Contiguous enums enumerate their
+  ## ordinal range directly; holey enums (explicit ordinals with gaps)
+  ## probe each ordinal and keep only the ones `symbolRank` accepts —
+  ## it raises `IndexDefect` exactly on hole ordinals, so a hole can
+  ## never leak into the value list (a bare `T(o)` cast would silently
+  ## produce an invalid value). The `HoleEnumConv` warning on the probe
+  ## cast is intentional: the probe *is* the validity check.
+  var cached {.global.}: seq[T]
+  if cached.len == 0:
+    when T is Ordinal:
+      for o in ord(low(T))..ord(high(T)):
+        cached.add T(o)
+    else:
+      {.push warning[HoleEnumConv]: off.}
+      for o in ord(low(T))..ord(high(T)):
+        let v = T(o)
+        try:
+          discard symbolRank(v)
+          cached.add v
+        except IndexDefect:
+          discard
+      {.pop.}
+  cached
+
+proc genEnum*[T: enum](r: var Rng, t: typedesc[T]): T =
+  ## Uniform pick of a value of enum type `T` — every declared variant
+  ## gets its turn, including variants added later (no hand-written value
+  ## list to drift). Holey enums are safe (see `enumValuesOf`).
+  ##
+  ## The type travels as a `typedesc` argument — `r.genEnum(Color)` —
+  ## rather than an explicit type parameter, because explicit type
+  ## arguments do not work in UFCS position in Nim 2.2 (`r.genEnum[Color]()`
+  ## fails to instantiate); the `typedesc` form keeps the `r.` method-call
+  ## style every other generator uses.
+  ##
+  ## Each draw consumes exactly one `below` call, so the stream stays
+  ## seed-deterministic: same seed gives the same values, bit for bit.
+  let vals = enumValuesOf[T]()
+  vals[r.below(vals.len)]
+
+proc shrinkEnum*[T: enum](x: T): seq[T] =
+  ## Shrink an enum value toward `low(T)`, most-aggressive first (the
+  ## `low(T)` candidate comes first), so minimal counterexamples prefer
+  ## the earliest-declared variant. Holes are skipped: only declared
+  ## values appear in the candidate list.
+  for v in enumValuesOf[T]():
+    if ord(v) < ord(x): result.add v
+  # enumValuesOf is in ascending ordinal order, so low(T) — the most
+  # aggressive candidate — is already first. No reversal.
 
 proc genPermutation*(r: var Rng, n: int): seq[int] =
   ## Random permutation of `0 ..< n` (Fisher-Yates). The index form of

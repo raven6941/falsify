@@ -77,6 +77,32 @@ let v = r.genFrequency([(9, r.genInt(0, 100)),    # the common case
 `genOneOf([g0, g1, g2])` is uniform choice among generator expressions;
 `genElements(xs)` picks a value from `xs`.
 
+`genEnum` draws uniformly from an enum type — every declared variant,
+with no hand-written value list to drift when the enum gains a variant:
+
+```nim
+type Color = enum red, green, blue
+let c = r.genEnum(Color)   # typedesc argument: r.genEnum(Color), not r.genEnum[Color]()
+```
+
+The type travels as a `typedesc` argument because explicit type arguments
+don't work in UFCS position in Nim 2.2 (`r.genEnum[Color]()` fails to
+instantiate — a compiler limitation, not a falsify one). Holey enums
+(explicit ordinals with gaps) are safe: only declared values are ever
+drawn, never a hole ordinal cast (which would silently produce an invalid
+value). `shrinkEnum(x)` shrinks toward `low(T)`, most-aggressive first,
+so it composes with the usual `forAll` shrinker slot:
+
+```nim
+forAll("colors", r, 200,
+  proc(r: var Rng): Color = r.genEnum(Color),
+  proc(c: Color): bool = ...,
+  proc(c: Color): seq[Color] = shrinkEnum(c))
+```
+
+Each draw consumes exactly one RNG step, so the stream stays
+seed-deterministic.
+
 `genShuffle(xs)` permutes a seq (Fisher-Yates, QuickCheck `shuffle`
 style) — the generator for ordering properties:
 
