@@ -1,4 +1,6 @@
-# falsify — property-based testing for Nim
+# falsify 
+
+Property-based testing for Nim.
 
 Falsify your properties: generate random inputs, shrink failures to minimal
 counterexamples, reproduce everything from a seed.
