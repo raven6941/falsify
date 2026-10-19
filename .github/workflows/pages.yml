@@ -24,7 +24,7 @@ jobs:
         uses: pandoc/actions/setup@v1
         with:
           version: 3.6
-      - name: Build styled home page from README
+      - name: Convert Markdown files to HTML
         run: tools/build_pages_local.sh _site
       - name: Upload site
         if: github.event_name != 'pull_request'
