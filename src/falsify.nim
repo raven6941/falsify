@@ -669,6 +669,19 @@ type HealthCheck* = enum
   hcFewExamples
     ## Fewer than `minExamples` cases actually evaluated.
 
+type RunReport* = object
+  ## Machine-readable result of a `forAll` run.
+  name*: string
+  ok*: bool
+  cases*: int
+  discards*: int
+  seed*: uint64
+  minimal*: string
+  shrinksTried*: int
+  budgetExhausted*: bool
+  healthTrips*: set[HealthCheck]
+  elapsedMs*: float
+
 type HealthChecks* = object
   maxMeanCaseMs*: float
     ## Warn when the mean per-case property time (generation excluded)
@@ -813,7 +826,7 @@ proc mutateTarget*[T](r: var Rng, best: T,
   let k = min(4, cands.len)
   (true, cands[cands.len - 1 - r.below(k)])
 
-proc forAll*[T](name: string, r: var Rng, n: int,
+proc forAllReport*[T](name: string, r: var Rng, n: int,
                 gen: proc(r: var Rng): T,
                 prop: proc(x: T): bool,
                 shrink: proc(x: T): seq[T] = nil,
@@ -823,10 +836,10 @@ proc forAll*[T](name: string, r: var Rng, n: int,
                 cover: seq[CoverReq] = @[],
                 assume: proc(x: T): bool = nil,
                 settings: FalsifySettings = defaultSettings(),
-                target: proc(x: T): float = nil): bool =
+                target: proc(x: T): float = nil): RunReport =
   ## Run `prop` on `n` generated inputs. On the first failure, shrink
   ## (if a shrinker is given) and print the seed + case index + minimal
-  ## case, then return false. Returns true iff all cases pass.
+  ## case. Returns a `RunReport`; use `report.ok` for the verdict.
   ##
   ## The failure line is the replay recipe: it prints `r.seed` (see
   ## `Rng.seed`), so re-running with `initRng(seed)` and the same
@@ -1010,11 +1023,17 @@ proc forAll*[T](name: string, r: var Rng, n: int,
   ## are outside classification, coverage, the health checks, targeting, and the
   ## per-case deadline: they are deliberate, not sampled, and measuring
   ## them would distort the sweep's statistics.
-  proc shrinkMinimal(x: T): tuple[val: T, budgetExhausted: bool] =
+  var report = RunReport(name: name, ok: true, seed: r.seed)
+  let started = getMonoTime()
+  defer:
+    report.elapsedMs = inMilliseconds(getMonoTime() - started).float
+    result = report
+
+  proc shrinkMinimal(x: T): tuple[val: T, budgetExhausted: bool, tried: int] =
     ## Greedy-shrink `x` to a minimal still-failing input (candidates
     ## most-aggressive first), honoring the `settings.maxShrinks` budget.
     ## `prop` exceptions/defects count as failures, same as in the sweep.
-    result = (x, false)
+    result = (x, false, 0)
     if shrink == nil: return result
     var shrinksUsed = 0
     var cands = shrink(result[0])
@@ -1022,8 +1041,9 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       var progressed = false
       for c in cands:
         if settings.maxShrinks > 0 and shrinksUsed >= settings.maxShrinks:
-          return (result[0], true)
+          return (result[0], true, shrinksUsed)
         inc shrinksUsed
+        result[2] = shrinksUsed
         var cf = false
         try: cf = not prop(c)
         except CatchableError: cf = true
@@ -1074,7 +1094,10 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       if failed:
         # The value *is* the replay recipe: no seed needed. Shrink with
         # the same shrinker for a consistent minimal-input line.
-        let (minimal, budgetExhausted) = shrinkMinimal(x)
+        let (minimal, budgetExhausted, shrinksTried) = shrinkMinimal(x)
+        report.minimal = $minimal
+        report.shrinksTried = shrinksTried
+        report.budgetExhausted = budgetExhausted
         var failLine = "FAIL [" & name & "]: example " & $ei & ": " & $x &
           ", minimal input: " & $minimal
         if settings.maxShrinks > 0:
@@ -1119,6 +1142,8 @@ proc forAll*[T](name: string, r: var Rng, n: int,
           return false
         if not holds:
           inc discards
+          if not isReplay:
+            report.discards = discards
           if discards > settings.maxDiscards:
             echo "FAIL [", name, "]: gave up: discarded ", discards,
               " > maxDiscards ", settings.maxDiscards, " cases"
@@ -1158,7 +1183,13 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         echo "FAIL [", name, "]: defect on input: ", d.name, ": ", d.msg
         failed = true
       let caseMs = inMilliseconds(getMonoTime() - t0).float
+      if not isReplay:
+        report.cases = evaluated + 1
       if settings.deadlineMs > 0 and caseMs > settings.deadlineMs.float:
+        if not isReplay:
+          report.ok = false
+          report.seed = rr.seed
+          report.minimal = $x
         echo "DEADLINE [", name, "]: case ", i, " took ",
           formatFloat(caseMs, ffDecimal, 1), "ms > ", settings.deadlineMs,
           "ms deadline, seed: ", rr.seed
@@ -1166,9 +1197,18 @@ proc forAll*[T](name: string, r: var Rng, n: int,
       if not isReplay:
         inc evaluated
         totalMs += caseMs
+        report.cases = evaluated
+        report.discards = discards
       if failed:
         result = false
-        let (minimal, budgetExhausted) = shrinkMinimal(x)
+        report.healthTrips = trippedChecks(totalMs, totalBytes, evaluated,
+                                           discards, settings.health)
+        let (minimal, budgetExhausted, shrinksTried) = shrinkMinimal(x)
+        report.ok = false
+        report.minimal = $minimal
+        report.seed = rr.seed
+        report.shrinksTried = shrinksTried
+        report.budgetExhausted = budgetExhausted
         var failLine = "FAIL [" & name & "]: seed: " & $rr.seed & ", case " & $i &
           ", minimal input: " & $minimal
         if settings.maxShrinks > 0:
@@ -1184,6 +1224,10 @@ proc forAll*[T](name: string, r: var Rng, n: int,
         echo "ok [", name, "]: replay seed ", rr.seed, ", ", n, " cases"
     else:
       let quiet = settings.verbosity == vQuiet
+      report.cases = evaluated
+      report.discards = discards
+      report.healthTrips = trippedChecks(totalMs, totalBytes, evaluated,
+                                         discards, settings.health)
       if classify != nil:
         if not reportCoverage(name, counts, n, cover, quiet): return false
       if not reportHealth(name, totalMs, totalBytes, evaluated, discards,
@@ -1206,12 +1250,34 @@ proc forAll*[T](name: string, r: var Rng, n: int,
     "forAll: `cover` requires `classify`"
   doAssert settings.deadlineMs >= 0, "forAll: `settings.deadlineMs` must be non-negative"
   doAssert settings.maxShrinks >= 0, "forAll: `settings.maxShrinks` must be non-negative"
-  result = true
-  if not runExamples(): return false
+  result = RunReport(name: name, ok: true, seed: r.seed)
+  if not runExamples():
+    report.ok = false
+    return
   for seed in regressions:
     var rr = initRng(seed)
-    if not runSweep(rr, isReplay = true): return false
-  if not runSweep(r, isReplay = false): return false
+    if not runSweep(rr, isReplay = true):
+      report.ok = false
+      report.seed = seed
+      return
+  if not runSweep(r, isReplay = false):
+    report.ok = false
+    return
+
+proc forAll*[T](name: string, r: var Rng, n: int,
+                gen: proc(r: var Rng): T,
+                prop: proc(x: T): bool,
+                shrink: proc(x: T): seq[T] = nil,
+                regressions: seq[uint64] = @[],
+                examples: seq[T] = @[],
+                classify: proc(x: T): seq[string] = nil,
+                cover: seq[CoverReq] = @[],
+                assume: proc(x: T): bool = nil,
+                settings: FalsifySettings = defaultSettings(),
+                target: proc(x: T): float = nil): bool =
+  ## Compatibility wrapper returning only the verdict.
+  forAllReport(name, r, n, gen, prop, shrink, regressions, examples,
+               classify, cover, assume, settings, target).ok
 
 proc replayCmds*[C, M, Sys](cmds: seq[C],
     newModel: proc(): M,

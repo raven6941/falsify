@@ -31,6 +31,33 @@ The printed seed is the replay recipe: re-run the property with
 `initRng(424242)` (same case count, generator, property, shrinker) and you
 get the identical stream and the identical minimal counterexample.
 
+For CI or other tooling, `forAllReport` returns the same result as a
+machine-readable `RunReport`; `forAll` remains available when only a boolean
+verdict is needed. Reports are type-independent, so a suite can aggregate
+properties with different generated value types:
+
+```nim
+var reports: seq[RunReport] = @[]
+var intRng = initRng(424242)
+reports.add(forAllReport("positive", intRng, 200,
+  proc(r: var Rng): int = r.genInt(-100, 100),
+  proc(x: int): bool = x >= 0,
+  shrinkInt))
+var stringRng = initRng(424243)
+reports.add(forAllReport("nonempty", stringRng, 200,
+  proc(r: var Rng): string = r.genString(20),
+  proc(x: string): bool = x.len > 0,
+  shrinkString))
+var failures = 0
+for report in reports:
+  if not report.ok: inc failures
+if failures > 0: quit(1)
+```
+
+Each report includes the property name, verdict, evaluated cases and
+discards, replay seed, stringified minimal counterexample, shrink statistics,
+health-check trips, and elapsed milliseconds.
+
 An `assert` (or any defect) in the property or the code under test is a
 failure, not a crash: it is reported with the seed + minimal input like
 any other failure, and `forAll` returns `false` so the suite continues.
