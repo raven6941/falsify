@@ -6,6 +6,7 @@ Falsify your properties: generate random inputs, shrink failures to minimal
 counterexamples, reproduce everything from a seed.
 
 ```nim
+import std/algorithm  # for `reversed`
 import falsify
 
 const Seed = 424242'u64  # fixed in CI; vary locally when hunting flakes
@@ -36,17 +37,20 @@ any other failure, and `forAll` returns `false` so the suite continues.
 
 ## Installation
 
-Requires Nim >= 2.0.0. From the Nimble package directory:
-
-```sh
-nimble install falsify
-```
-
-Or straight from source:
+Requires Nim >= 2.0.0. Straight from source:
 
 ```sh
 nimble install https://github.com/raven6941/falsify
 ```
+
+Pinned to the release:
+
+```sh
+nimble install https://github.com/raven6941/falsify@#v0.1.0
+```
+
+(Once falsify is listed in the Nimble package directory, bare
+`nimble install falsify` will work too.)
 
 Then `import falsify` in your test files. Zero dependencies beyond the
 stdlib; the whole library is the single module `src/falsify.nim`.
