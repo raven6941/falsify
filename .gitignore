@@ -1,0 +1,5 @@
+# Compiled binaries — build output, never tracked
+tests/test_falsify
+src/falsify
+*.exe
+nimcache/
